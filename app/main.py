@@ -110,7 +110,6 @@ class PointResponse(BaseModel):
     dy: float
 
 
-
 class PointList(BaseModel):
     locations: List[Tuple[float, float, float]]
 
@@ -189,7 +188,6 @@ class ColumnPointListResponse(BaseModel):
     z: List[float]
     dx: List[float]
     dy: List[float]
-
 
 
 class QueryColumnPointListResponse(BaseModel):
@@ -291,15 +289,6 @@ async def transform_values_binary(
 
     # scale & adjust locations
     transformed = await run_in_threadpool(map_points, dataset.value, scale, locs)
-
-    # Set results
-    results = {
-        "x": transformed["x"].tolist(),
-        "y": transformed["y"].tolist(),
-        "z": transformed["z"].tolist(),
-        "dx": transformed["dx"].tolist(),
-        "dy": transformed["dy"].tolist(),
-    }
 
     data = np.zeros(dtype=np.float32, shape=(2, points), order="C")
     data[0, :] = transformed["dx"]
