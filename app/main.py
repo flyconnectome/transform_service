@@ -340,3 +340,9 @@ async def query_values_binary(
         data = data.swapaxes(0, 1)
 
     return Response(content=data.tobytes(), media_type="application/octet-stream")
+
+
+# Catch all for all other paths for debugging
+@app.api_route("/{path_name:path}", methods=["GET"])
+async def catch_all(request: Request, path_name: str):
+    return {"request_method": request.method, "path_name": path_name}
