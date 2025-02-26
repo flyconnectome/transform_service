@@ -110,42 +110,11 @@ class PointResponse(BaseModel):
     dy: float
 
 
-@app.get(
-    "/dataset/{dataset}/s/{scale}/z/{z}/x/{x}/y/{y}/",
-    response_model=PointResponse,
-    deprecated=True,
-    tags=["deprecated"],
-)
-async def transform_point_value(
-    dataset: DataSetName, scale: int, z: int, x: float, y: float
-):
-    """Query a single point."""
-
-    locs = np.asarray([[x, y, z]])
-
-    transformed = await run_in_threadpool(map_points, dataset.value, scale, locs)
-
-    result = {
-        "x": transformed["x"].tolist()[0],
-        "y": transformed["y"].tolist()[0],
-        "z": transformed["z"].tolist()[0],
-        "dx": transformed["dx"].tolist()[0],
-        "dy": transformed["dy"].tolist()[0],
-    }
-
-    return result
-
 
 class PointList(BaseModel):
     locations: List[Tuple[float, float, float]]
 
 
-@app.post(
-    "/dataset/{dataset}/s/{scale}/values",
-    response_model=List[PointResponse],
-    deprecated=True,
-    tags=["deprecated"],
-)
 @app.post(
     "/transform/dataset/{dataset}/s/{scale}/values",
     response_model=List[PointResponse],
@@ -222,45 +191,6 @@ class ColumnPointListResponse(BaseModel):
     dy: List[float]
 
 
-@app.post(
-    "/dataset/{dataset}/s/{scale}/values_array",
-    response_model=ColumnPointListResponse,
-    deprecated=True,
-    tags=["deprecated"],
-)
-@app.post(
-    "/transform/dataset/{dataset}/s/{scale}/values_array",
-    response_model=ColumnPointListResponse,
-    tags=["transform"],
-)
-async def transform_values_array(
-    dataset: DataSetName, scale: int, locs: ColumnPointList
-):
-    """Return dx, dy and new coordinates for an input set of locations."""
-
-    # Get a Nx3 array of points
-    locs = np.array([locs.x, locs.y, locs.z]).astype(np.float32).swapaxes(0, 1)
-
-    if locs.shape[0] > config.MaxLocations:
-        raise HTTPException(
-            status_code=400,
-            detail="Max number of locations ({}) exceeded".format(config.MaxLocations),
-        )
-
-    # scale & adjust locations
-    transformed = await run_in_threadpool(map_points, dataset.value, scale, locs)
-
-    # Set results
-    results = {
-        "x": transformed["x"].tolist(),
-        "y": transformed["y"].tolist(),
-        "z": transformed["z"].tolist(),
-        "dx": transformed["dx"].tolist(),
-        "dy": transformed["dy"].tolist(),
-    }
-
-    return results
-
 
 class QueryColumnPointListResponse(BaseModel):
     values: List[List[float]]
@@ -323,18 +253,6 @@ class BinaryFormats(str, Enum):
     array_Nx3 = "array_float_Nx3"
 
 
-@app.post(
-    "/dataset/{dataset}/s/{scale}/values_binary/format/{format}",
-    response_model=None,
-    responses={
-        200: {
-            "content": {"application/octet-stream": {}},
-            "description": "Binary encoding of output array.",
-        }
-    },
-    deprecated=True,
-    tags=["deprecated"],
-)
 @app.post(
     "/transform/dataset/{dataset}/s/{scale}/values_binary/format/{format}",
     response_model=None,
