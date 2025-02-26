@@ -32,7 +32,14 @@ def _get_ids(vol, co):
     return co_id
 
 
-def get_multiple_ids(x, vol, dtype=None, max_workers=4, blocksize=np.array([512, 512, 32]), error_value=np.nan):
+def get_multiple_ids(
+    x,
+    vol,
+    dtype=None,
+    max_workers=4,
+    blocksize=np.array([512, 512, 32]),
+    error_value=np.nan,
+):
     """Return multiple segment IDs using cloudvolume.
 
     Parameters
@@ -57,18 +64,18 @@ def get_multiple_ids(x, vol, dtype=None, max_workers=4, blocksize=np.array([512,
 
     # Sort data into bins
     cbin = pd.DataFrame(x)
-    cbin['x_bin'] = pd.cut(cbin[0], xbins, include_lowest=True, right=False)
-    cbin['y_bin'] = pd.cut(cbin[1], ybins, include_lowest=True, right=False)
-    cbin['z_bin'] = pd.cut(cbin[2], zbins, include_lowest=True, right=False)
+    cbin["x_bin"] = pd.cut(cbin[0], xbins, include_lowest=True, right=False)
+    cbin["y_bin"] = pd.cut(cbin[1], ybins, include_lowest=True, right=False)
+    cbin["z_bin"] = pd.cut(cbin[2], zbins, include_lowest=True, right=False)
 
     # Throw out NaNs
     cbin = cbin.loc[~np.any(cbin.isnull(), axis=1)]
 
     # This is now a dictionary of bin -> indices of coordinates
-    blocked = cbin.groupby(['x_bin', 'y_bin', 'z_bin']).indices
+    blocked = cbin.groupby(["x_bin", "y_bin", "z_bin"]).indices
 
     # Map filtered indices back to non-filtered indices
-    blocked = {k: cbin.index[v] for k,v in blocked.items()}
+    blocked = {k: cbin.index[v] for k, v in blocked.items()}
 
     # Start process pool (do not use max cpu count -> appears to be a bottle neck)
 
@@ -91,7 +98,7 @@ def get_multiple_ids(x, vol, dtype=None, max_workers=4, blocksize=np.array([512,
 
         seg_ids = np.vstack(result)
 
-        #pool.clear()
+        # pool.clear()
 
     # Turn list of list of indices into a flat array
     seg_ix = np.hstack(seg_ix)

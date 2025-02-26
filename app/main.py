@@ -13,7 +13,7 @@ import uvicorn
 
 from typing import Optional, List, Any, Tuple
 
-from starlette.concurrency import run_in_threadpool 
+from starlette.concurrency import run_in_threadpool
 from fastapi import FastAPI, HTTPException, Body, Response, Request
 from fastapi.responses import HTMLResponse, ORJSONResponse
 from fastapi.templating import Jinja2Templates
@@ -42,7 +42,9 @@ _Note on using [msgpack](https://msgpack.org/)_: Use `Content-type: application/
 
 """
 
-templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
+templates = Jinja2Templates(
+    directory=os.path.join(os.path.dirname(__file__), "templates")
+)
 
 tags_metadata = [
     {
@@ -51,25 +53,24 @@ tags_metadata = [
     },
     {
         "name": "query",
-        "description": "Retrieve the values stored at a set of points (e.g. segmentation values at a set of voxels)"
+        "description": "Retrieve the values stored at a set of points (e.g. segmentation values at a set of voxels)",
     },
-    {
-        "name": "other"
-    },
-    {
-        "name": "deprecated"
-    }
+    {"name": "other"},
+    {"name": "deprecated"},
 ]
 
 
-app = FastAPI(default_response_class=ORJSONResponse,
-                title="Transformation Service",
-                description=api_description,
-                openapi_tags=tags_metadata,
-                debug=True)
+app = FastAPI(
+    default_response_class=ORJSONResponse,
+    title="Transformation Service",
+    description=api_description,
+    openapi_tags=tags_metadata,
+    debug=True,
+)
 
 # MessagePackMiddleware does not currently support large request (`more_body`) so we'll do our own...
 app.add_middleware(MessagePackMiddleware)
+
 
 #
 # Main page of the service
@@ -78,21 +79,25 @@ app.add_middleware(MessagePackMiddleware)
 async def root(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
-@app.get('/info/', tags=["other"])
+
+@app.get("/info/", tags=["other"])
 async def dataset_info():
     """Retrieve a list of available datasources."""
     cleaned_datsets = {}
     for k, info in config.DATASOURCES.items():
         cleaned_datsets[k] = {}
-        for field in ('scales', 'voxel_size', 'description'):
+        for field in ("scales", "voxel_size", "description"):
             cleaned_datsets[k][field] = info.get(field, None)
-        
+
     return cleaned_datsets
 
 
 # Datasets to be displayed in UI if they are part of an enum...
 # This is a hack to populate the values.
-DataSetName = Enum("DataSetName", dict(zip(config.DATASOURCES.keys(), config.DATASOURCES.keys())))
+DataSetName = Enum(
+    "DataSetName", dict(zip(config.DATASOURCES.keys(), config.DATASOURCES.keys()))
+)
+
 
 #
 # Single point vector field query
@@ -104,38 +109,58 @@ class PointResponse(BaseModel):
     dx: float
     dy: float
 
-@app.get('/dataset/{dataset}/s/{scale}/z/{z}/x/{x}/y/{y}/', response_model=PointResponse, deprecated=True, tags=["deprecated"])
-async def transform_point_value(dataset: DataSetName, scale: int, z: int, x: float, y: float):
+
+@app.get(
+    "/dataset/{dataset}/s/{scale}/z/{z}/x/{x}/y/{y}/",
+    response_model=PointResponse,
+    deprecated=True,
+    tags=["deprecated"],
+)
+async def transform_point_value(
+    dataset: DataSetName, scale: int, z: int, x: float, y: float
+):
     """Query a single point."""
 
-    locs = np.asarray([[x,y,z]])
+    locs = np.asarray([[x, y, z]])
 
     transformed = await run_in_threadpool(map_points, dataset.value, scale, locs)
 
     result = {
-         'x': transformed['x'].tolist()[0],
-         'y': transformed['y'].tolist()[0],
-         'z': transformed['z'].tolist()[0],
-         'dx': transformed['dx'].tolist()[0],
-         'dy': transformed['dy'].tolist()[0]
-     }
+        "x": transformed["x"].tolist()[0],
+        "y": transformed["y"].tolist()[0],
+        "z": transformed["z"].tolist()[0],
+        "dx": transformed["dx"].tolist()[0],
+        "dy": transformed["dy"].tolist()[0],
+    }
 
     return result
 
 
 class PointList(BaseModel):
-    locations : List[Tuple[float, float, float]]
+    locations: List[Tuple[float, float, float]]
 
-@app.post('/dataset/{dataset}/s/{scale}/values', response_model=List[PointResponse], deprecated=True, tags=["deprecated"])
-@app.post('/transform/dataset/{dataset}/s/{scale}/values', response_model=List[PointResponse], tags=["transform"])
-async def transform_values(dataset: DataSetName, scale: int, data : PointList):
+
+@app.post(
+    "/dataset/{dataset}/s/{scale}/values",
+    response_model=List[PointResponse],
+    deprecated=True,
+    tags=["deprecated"],
+)
+@app.post(
+    "/transform/dataset/{dataset}/s/{scale}/values",
+    response_model=List[PointResponse],
+    tags=["transform"],
+)
+async def transform_values(dataset: DataSetName, scale: int, data: PointList):
     """Return dx, dy and new coordinates for an input set of locations."""
 
     locs = np.array(data.locations).astype(np.float32)
 
     if locs.shape[0] > config.MaxLocations:
-        raise HTTPException(status_code=400,
-            detail="Max number of locations ({}) exceeded".format(config.MaxLocations))
+        raise HTTPException(
+            status_code=400,
+            detail="Max number of locations ({}) exceeded".format(config.MaxLocations),
+        )
 
     # scale & adjust locations
     transformed = await run_in_threadpool(map_points, dataset.value, scale, locs)
@@ -144,19 +169,27 @@ async def transform_values(dataset: DataSetName, scale: int, data : PointList):
     results = []
     for i in range(transformed.shape[0]):
         row = transformed[i]
-        results.append({
-            'x': float(row['x']),
-            'y': float(row['y']),
-            'z': float(row['z']),
-            'dx': float(row['dx']),
-            'dy': float(row['dy'])
-        })
+        results.append(
+            {
+                "x": float(row["x"]),
+                "y": float(row["y"]),
+                "z": float(row["z"]),
+                "dx": float(row["dx"]),
+                "dy": float(row["dy"]),
+            }
+        )
 
     return results
 
 
-@app.post('/query/dataset/{dataset}/s/{scale}/cloud_volume_server', response_model=List[str], tags=["query"])
-async def query_values_cloud_volume_server(dataset: DataSetName, scale: int, data: PointList):
+@app.post(
+    "/query/dataset/{dataset}/s/{scale}/cloud_volume_server",
+    response_model=List[str],
+    tags=["query"],
+)
+async def query_values_cloud_volume_server(
+    dataset: DataSetName, scale: int, data: PointList
+):
     """
     Implements the [CloudVolumeServer](https://github.com/flyconnectome/CloudVolumeServer) API.
     """
@@ -164,8 +197,10 @@ async def query_values_cloud_volume_server(dataset: DataSetName, scale: int, dat
     locs = np.array(data.locations).astype(np.float32)
 
     if locs.shape[0] > config.MaxLocations:
-        raise HTTPException(status_code=400,
-            detail="Max number of locations ({}) exceeded".format(config.MaxLocations))
+        raise HTTPException(
+            status_code=400,
+            detail="Max number of locations ({}) exceeded".format(config.MaxLocations),
+        )
 
     data = await run_in_threadpool(query_points, dataset.value, scale, locs)
     data = data.flatten()
@@ -178,6 +213,7 @@ class ColumnPointList(BaseModel):
     y: List[float]
     z: List[float]
 
+
 class ColumnPointListResponse(BaseModel):
     x: List[float]
     y: List[float]
@@ -185,165 +221,215 @@ class ColumnPointListResponse(BaseModel):
     dx: List[float]
     dy: List[float]
 
-@app.post('/dataset/{dataset}/s/{scale}/values_array', response_model=ColumnPointListResponse, deprecated=True, tags=["deprecated"])
-@app.post('/transform/dataset/{dataset}/s/{scale}/values_array', response_model=ColumnPointListResponse, tags=["transform"])
-async def transform_values_array(dataset: DataSetName, scale: int, locs : ColumnPointList):
+
+@app.post(
+    "/dataset/{dataset}/s/{scale}/values_array",
+    response_model=ColumnPointListResponse,
+    deprecated=True,
+    tags=["deprecated"],
+)
+@app.post(
+    "/transform/dataset/{dataset}/s/{scale}/values_array",
+    response_model=ColumnPointListResponse,
+    tags=["transform"],
+)
+async def transform_values_array(
+    dataset: DataSetName, scale: int, locs: ColumnPointList
+):
     """Return dx, dy and new coordinates for an input set of locations."""
 
     # Get a Nx3 array of points
-    locs = np.array([locs.x, locs.y, locs.z]).astype(np.float32).swapaxes(0,1)
+    locs = np.array([locs.x, locs.y, locs.z]).astype(np.float32).swapaxes(0, 1)
 
     if locs.shape[0] > config.MaxLocations:
-        raise HTTPException(status_code=400,
-            detail="Max number of locations ({}) exceeded".format(config.MaxLocations))
+        raise HTTPException(
+            status_code=400,
+            detail="Max number of locations ({}) exceeded".format(config.MaxLocations),
+        )
 
     # scale & adjust locations
     transformed = await run_in_threadpool(map_points, dataset.value, scale, locs)
 
     # Set results
     results = {
-            'x': transformed['x'].tolist(),
-            'y': transformed['y'].tolist(),
-            'z': transformed['z'].tolist(),
-            'dx': transformed['dx'].tolist(),
-            'dy': transformed['dy'].tolist()
-        }
+        "x": transformed["x"].tolist(),
+        "y": transformed["y"].tolist(),
+        "z": transformed["z"].tolist(),
+        "dx": transformed["dx"].tolist(),
+        "dy": transformed["dy"].tolist(),
+    }
 
     return results
+
 
 class QueryColumnPointListResponse(BaseModel):
     values: List[List[float]]
 
-@app.post('/query/dataset/{dataset}/s/{scale}/values_array', response_model=QueryColumnPointListResponse, tags=["query"])
-async def query_values_array(dataset: DataSetName, scale: int, locs : ColumnPointList):
+
+@app.post(
+    "/query/dataset/{dataset}/s/{scale}/values_array",
+    response_model=QueryColumnPointListResponse,
+    tags=["query"],
+)
+async def query_values_array(dataset: DataSetName, scale: int, locs: ColumnPointList):
     """Return segment IDs at given locations.
-       Note: This function returns float(s). For segments, use values_array_string_response.
+    Note: This function returns float(s). For segments, use values_array_string_response.
     """
 
     # Get a Nx3 array of points
-    locs = np.array([locs.x, locs.y, locs.z]).astype(np.float32).swapaxes(0,1)
+    locs = np.array([locs.x, locs.y, locs.z]).astype(np.float32).swapaxes(0, 1)
 
     if locs.shape[0] > config.MaxLocations:
-        raise HTTPException(status_code=400,
-            detail="Max number of locations ({}) exceeded".format(config.MaxLocations))
+        raise HTTPException(
+            status_code=400,
+            detail="Max number of locations ({}) exceeded".format(config.MaxLocations),
+        )
 
     data = await run_in_threadpool(query_points, dataset.value, scale, locs)
     # Nx1 to 1xN
-    data = data.swapaxes(0,1)
+    data = data.swapaxes(0, 1)
 
     # Set results
-    results = {
-        'values' : data.tolist()
-    }
+    results = {"values": data.tolist()}
 
-    return results   
+    return results
+
 
 class ColumnPointListStringResponse(BaseModel):
     values: List[List[str]]
 
-@app.post('/query/dataset/{dataset}/s/{scale}/values_array_string_response', response_model=ColumnPointListStringResponse, tags=["query"])
-async def query_values_array_string(dataset: DataSetName, scale: int, locs : ColumnPointList):
+
+@app.post(
+    "/query/dataset/{dataset}/s/{scale}/values_array_string_response",
+    response_model=ColumnPointListStringResponse,
+    tags=["query"],
+)
+async def query_values_array_string(
+    dataset: DataSetName, scale: int, locs: ColumnPointList
+):
     """Return segment IDs at given locations.
-       Like *query_values_array*, but result array contains strings for easier parsing in R.
+    Like *query_values_array*, but result array contains strings for easier parsing in R.
     """
 
     results = await query_values_array(dataset, scale, locs)
 
-    results = {
-        'values' : [[str(j) for j in i] for i in results['values']]
-    }
+    results = {"values": [[str(j) for j in i] for i in results["values"]]}
 
     return results
+
 
 class BinaryFormats(str, Enum):
     array_3xN = "array_float_3xN"
     array_Nx3 = "array_float_Nx3"
 
-@app.post('/dataset/{dataset}/s/{scale}/values_binary/format/{format}',
-            response_model=None,
-            responses={ 200: {"content": {"application/octet-stream": {}},
-                        "description": "Binary encoding of output array."}},
-                deprecated=True, tags=["deprecated"]
-            )
-@app.post('/transform/dataset/{dataset}/s/{scale}/values_binary/format/{format}',
-            response_model=None,
-            responses={ 200: {"content": {"application/octet-stream": {}},
-                        "description": "Binary encoding of output array."}},
-            tags=["transform"]
-            )
-async def transform_values_binary(dataset: DataSetName, scale: int, format: BinaryFormats, request: Request):
-    """Raw binary version of the API. Data will consist of 1 uint 32.
-       Currently acceptable formats consist of a single uint32 with the number of records, 
-       All values must be little-endian floating point nubers.
 
-       The response will _only_ contain `dx` and `dy`, stored as either 2xN or Nx2 (depending on format chosen)
+@app.post(
+    "/dataset/{dataset}/s/{scale}/values_binary/format/{format}",
+    response_model=None,
+    responses={
+        200: {
+            "content": {"application/octet-stream": {}},
+            "description": "Binary encoding of output array.",
+        }
+    },
+    deprecated=True,
+    tags=["deprecated"],
+)
+@app.post(
+    "/transform/dataset/{dataset}/s/{scale}/values_binary/format/{format}",
+    response_model=None,
+    responses={
+        200: {
+            "content": {"application/octet-stream": {}},
+            "description": "Binary encoding of output array.",
+        }
+    },
+    tags=["transform"],
+)
+async def transform_values_binary(
+    dataset: DataSetName, scale: int, format: BinaryFormats, request: Request
+):
+    """Raw binary version of the API. Data will consist of 1 uint 32.
+    Currently acceptable formats consist of a single uint32 with the number of records,
+    All values must be little-endian floating point nubers.
+
+    The response will _only_ contain `dx` and `dy`, stored as either 2xN or Nx2 (depending on format chosen)
     """
 
     body = await request.body()
     points = len(body) // (3 * 4)  # 3 x float
     if format == BinaryFormats.array_3xN:
-        locs = np.frombuffer(body, dtype=np.float32).reshape(3,points).swapaxes(0,1)
+        locs = np.frombuffer(body, dtype=np.float32).reshape(3, points).swapaxes(0, 1)
     elif format == BinaryFormats.array_Nx3:
-        locs = np.frombuffer(body, dtype=np.float32).reshape(points,3)
+        locs = np.frombuffer(body, dtype=np.float32).reshape(points, 3)
     else:
         raise Exception("Unexpected format: {}".format(format))
 
     if locs.shape[0] > config.MaxLocations:
-        raise HTTPException(status_code=400,
-            detail="Max number of locations ({}) exceeded".format(config.MaxLocations))
+        raise HTTPException(
+            status_code=400,
+            detail="Max number of locations ({}) exceeded".format(config.MaxLocations),
+        )
 
     # scale & adjust locations
     transformed = await run_in_threadpool(map_points, dataset.value, scale, locs)
 
     # Set results
     results = {
-            'x': transformed['x'].tolist(),
-            'y': transformed['y'].tolist(),
-            'z': transformed['z'].tolist(),
-            'dx': transformed['dx'].tolist(),
-            'dy': transformed['dy'].tolist()
-        }
+        "x": transformed["x"].tolist(),
+        "y": transformed["y"].tolist(),
+        "z": transformed["z"].tolist(),
+        "dx": transformed["dx"].tolist(),
+        "dy": transformed["dy"].tolist(),
+    }
 
-    data = np.zeros(dtype=np.float32, shape=(2,points), order="C")
-    data[0,:] = transformed['dx']
-    data[1,:] = transformed['dy']
+    data = np.zeros(dtype=np.float32, shape=(2, points), order="C")
+    data[0, :] = transformed["dx"]
+    data[1, :] = transformed["dy"]
     if format == BinaryFormats.array_Nx3:
-        data = data.swapaxes(0,1)
+        data = data.swapaxes(0, 1)
 
     return Response(content=data.tobytes(), media_type="application/octet-stream")
 
 
-
-@app.post('/query/dataset/{dataset}/s/{scale}/values_binary/format/{format}',
-            response_model=None,
-            responses={ 200: {"content": {"application/octet-stream": {}},
-                        "description": "Binary encoding of output array."}},
-            tags=["query"]
-            )
-async def query_values_binary(dataset: DataSetName, scale: int, format: BinaryFormats, request: Request):
+@app.post(
+    "/query/dataset/{dataset}/s/{scale}/values_binary/format/{format}",
+    response_model=None,
+    responses={
+        200: {
+            "content": {"application/octet-stream": {}},
+            "description": "Binary encoding of output array.",
+        }
+    },
+    tags=["query"],
+)
+async def query_values_binary(
+    dataset: DataSetName, scale: int, format: BinaryFormats, request: Request
+):
     """Query a dataset for values at a point(s)
 
-       The response will _only_ contain the value(s) at the coordinates requested.
-       The datatype returned will be of the type referenced in */info/*.
+    The response will _only_ contain the value(s) at the coordinates requested.
+    The datatype returned will be of the type referenced in */info/*.
     """
 
     body = await request.body()
     points = len(body) // (3 * 4)  # 3 x float
     if format == BinaryFormats.array_3xN:
-        locs = np.frombuffer(body, dtype=np.float32).reshape(3,points).swapaxes(0,1)
+        locs = np.frombuffer(body, dtype=np.float32).reshape(3, points).swapaxes(0, 1)
     elif format == BinaryFormats.array_Nx3:
-        locs = np.frombuffer(body, dtype=np.float32).reshape(points,3)
+        locs = np.frombuffer(body, dtype=np.float32).reshape(points, 3)
     else:
         raise Exception("Unexpected format: {}".format(format))
 
     if locs.shape[0] > config.MaxLocations:
-        raise HTTPException(status_code=400,
-            detail="Max number of locations ({}) exceeded".format(config.MaxLocations))
+        raise HTTPException(
+            status_code=400,
+            detail="Max number of locations ({}) exceeded".format(config.MaxLocations),
+        )
 
     data = await run_in_threadpool(query_points, dataset.value, scale, locs)
 
     if format == BinaryFormats.array_Nx3:
-        data = data.swapaxes(0,1)
+        data = data.swapaxes(0, 1)
 
     return Response(content=data.tobytes(), media_type="application/octet-stream")
-
