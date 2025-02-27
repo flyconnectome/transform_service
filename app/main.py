@@ -333,6 +333,6 @@ async def query_values_binary(
 
 
 # Catch all for all other paths for debugging
-@app.api_route("/{path_name:path}", methods=["GET"])
-async def catch_all(request: Request, path_name: str):
-    return {"request_method": request.method, "path_name": path_name}
+# @app.api_route("/{path_name:path}", methods=["GET"])
+# async def catch_all(request: Request, path_name: str):
+#     return {"request_method": request.method, "path_name": path_name}
