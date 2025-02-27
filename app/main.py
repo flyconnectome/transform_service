@@ -16,12 +16,13 @@ from pydantic import BaseModel
 from . import config
 from .query import map_points, query_points
 
-api_description = """
-This service will take a set of points and will transform them using the specified field.
+
+API_DESCRIPTION = """
+This service takes a set of points and looks up the values at those points in a dataset. The dataset can be a segmentation volume, a displacement vector field, or any other data that can be indexed by a set of 3D coordinates.
 
 Query units should be in *pixels* at full resolution (e.g. mip=0), which generally maps to the coordinates shown in CATMAID or Neuroglancer.
 
-The return values are the transformed {x,y,z} along with the {dx,dy} values from the field.
+Depending on the dataset, the return values are either the segmentation ID at the given location or the displacement vector at that location.
 
 The selection of scale (mip) selects the granularity of the field being used, but will not change the units.
 
