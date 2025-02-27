@@ -33,11 +33,11 @@ _Note on using [msgpack](https://msgpack.org/)_: Use `Content-type: application/
 
 """
 
-templates = Jinja2Templates(
+TEMPLATES = Jinja2Templates(
     directory=os.path.join(os.path.dirname(__file__), "templates")
 )
 
-tags_metadata = [
+TAGS_METADATA = [
     {
         "name": "transform",
         "description": "Services to transform a set of points using a precomputed displacement field (e.g., FAFBv14 to FlyWire)",
@@ -54,21 +54,22 @@ tags_metadata = [
 app = FastAPI(
     default_response_class=ORJSONResponse,
     title="Transformation Service",
-    description=api_description,
-    openapi_tags=tags_metadata,
-    debug=True,
+    description=API_DESCRIPTION,
+    openapi_tags=TAGS_METADATA,
+    # we need to set a root path b/c we're running this behind a nginx proxy which
+    # adds "/transform-service" as prefix to all routes
+    root_path="/transform-service",
+    debug=True,  # turn off in production
 )
 
 # MessagePackMiddleware does not currently support large request (`more_body`) so we'll do our own...
 app.add_middleware(MessagePackMiddleware)
 
 
-#
 # Main page of the service
-#
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def root(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return TEMPLATES.TemplateResponse("index.html", {"request": request})
 
 
 @app.get("/info/", tags=["other"])
@@ -90,9 +91,7 @@ DataSetName = Enum(
 )
 
 
-#
 # Single point vector field query
-#
 class PointResponse(BaseModel):
     x: float
     y: float
