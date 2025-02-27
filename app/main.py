@@ -1,29 +1,19 @@
 #!/usr/bin/env python3
 import os
-import logging
-import traceback
-from enum import Enum
-import asyncio
 
-import zarr
 import numpy as np
-import orjson
-import msgpack
-import uvicorn
 
-from typing import Optional, List, Any, Tuple
-
+from enum import Enum
+from typing import List, Tuple
 from starlette.concurrency import run_in_threadpool
-from fastapi import FastAPI, HTTPException, Body, Response, Request
+from fastapi import FastAPI, HTTPException, Response, Request
 from fastapi.responses import HTMLResponse, ORJSONResponse
 from fastapi.templating import Jinja2Templates
 
 from msgpack_asgi import MessagePackMiddleware
-from pydantic import BaseModel, Field
-from starlette.responses import JSONResponse
+from pydantic import BaseModel
 
 from . import config
-from . import process
 from .query import map_points, query_points
 
 api_description = """
