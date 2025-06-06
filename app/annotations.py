@@ -35,11 +35,22 @@ def get_flywire_segmentation_properties(mat_version, labels, tags):
     # Parse labels into columns
     available_columns = info.columns
     cols_to_fetch = {FLYWIRE_MAT_VERSION_TO_COL[mat_version]}
+    backfills = []
     if "{" in labels:
         for label in re.findall(r"\{(.*?)\}", labels):
-            cols_to_fetch.add(label.strip())
+            if "<" in label:
+                backfills.append(label)
+                for la in label.split("<"):
+                    cols_to_fetch.add(la.strip())
+            else:
+                cols_to_fetch.add(label.strip())
     else:
-        cols_to_fetch.add(labels)
+        if "<" in labels:
+            backfills.append(labels)
+            for la in labels.split("<"):
+                cols_to_fetch.add(la.strip())
+        else:
+            cols_to_fetch.add(labels)
         labels = "{" + labels + "}"
 
     if tags:
@@ -63,6 +74,13 @@ def get_flywire_segmentation_properties(mat_version, labels, tags):
 
     # Some clean-ups
     data = data.drop_duplicates(subset="root_id")
+
+    # Generate backfills if needed
+    for bf in backfills:
+        data[bf] = pd.Series(None, dtype="string")
+        for col in bf.split("<"):
+            col = col.strip()
+            data[bf] = data[bf].fillna(data[col])
 
     # Compile data into labels
     labels_compiled = data.apply(labels.format_map, axis=1)
