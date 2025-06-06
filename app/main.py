@@ -69,7 +69,7 @@ app = FastAPI(
     # we need to set a root path b/c we're running this behind a nginx proxy which
     # adds "/transform-service" as prefix to all routes
     root_path="/transform-service",
-    debug=True,  # turn off in production
+    debug=False,  # turn on for debugging
 )
 
 # MessagePackMiddleware does not currently support large request (`more_body`) so we'll do our own...
