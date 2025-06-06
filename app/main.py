@@ -4,7 +4,7 @@ import os
 import numpy as np
 
 from enum import Enum
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 from starlette.concurrency import run_in_threadpool
 from fastapi import FastAPI, HTTPException, Response, Request
 from fastapi.responses import HTMLResponse, ORJSONResponse
@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from . import config
 from .query import map_points, query_points
+from .annotations import get_flywire_segmentation_properties
 
 
 API_DESCRIPTION = """
@@ -46,6 +47,14 @@ TAGS_METADATA = [
         "name": "query",
         "description": "Retrieve the values stored at a set of points (e.g. segmentation values at a set of voxels)",
     },
+    {
+        "name": "mapping",
+        "description": "Retrieve the mapping between two datasets",
+    },
+    {
+        "name": "annotations",
+        "description": "Retrieve segmentation annotations for FlyWire neurons",
+    },
     {"name": "other"},
     {"name": "deprecated"},
 ]
@@ -75,13 +84,13 @@ async def root(request: Request):
 @app.get("/info/", tags=["other"])
 async def dataset_info():
     """Retrieve a list of available datasources."""
-    cleaned_datsets = {}
+    cleaned_datasets = {}
     for k, info in config.DATASOURCES.items():
-        cleaned_datsets[k] = {}
+        cleaned_datasets[k] = {}
         for field in ("scales", "voxel_size", "description"):
-            cleaned_datsets[k][field] = info.get(field, None)
+            cleaned_datasets[k][field] = info.get(field, None)
 
-    return cleaned_datsets
+    return cleaned_datasets
 
 
 # Datasets to be displayed in UI if they are part of an enum...
@@ -331,6 +340,29 @@ async def query_values_binary(
 
     return Response(content=data.tobytes(), media_type="application/octet-stream")
 
+
+@app.get(
+    "/segmentation_annotations/flywire/{version}/{labels}/info",
+    tags=["annotations"],
+    response_model=Dict,
+)
+@app.get(
+    "/segmentation_annotations/flywire/{version}/{labels}/{tags}/info",
+    tags=["annotations"],
+    response_model=Dict,
+)
+async def flywire_segmentation_annotations(
+    version: str,
+    labels: str,
+    request: Request,
+    tags: str | None = None,
+):
+    """Retrieve segmentation annotations for FlyWire."""
+    # This is a placeholder for the actual implementation.
+    # The implementation would typically query a database or an external service.
+    return get_flywire_segmentation_properties(
+        mat_version=version, labels=labels, tags=tags
+    )
 
 # Catch all for all other paths for debugging
 # @app.api_route("/{path_name:path}", methods=["GET"])

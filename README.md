@@ -11,12 +11,16 @@ This project uses [`uv`](https://github.com/astral-sh/uv) to manage dependencies
 uv sync
 ```
 
-If you are running this serve in production, you probably want a virtual environment:
+If you are running this server in production, you probably want a virtual environment:
 
 ```bash
 # Create a virtual environment
 uv env
 ```
+
+In order to use the annotation service, you will also need to setup environment variables:
+- `SEATABLE_SERVER`: URL for FlyTable
+- `SEATABLE_API_TOKEN`: API token for FlyTable
 
 ## Run the web service locally
 ```uv run uvicorn --reload app.main:app```

@@ -11,14 +11,19 @@ dependencies = [
     "jinja2>=3.1.5",
     "msgpack>=1.1.0",
     "msgpack-asgi>=1.1.0",
+    "nglscenes",
     "numpy<2.0.0",
     "orjson>=3.10.15",
     "pandas>=2.2.3",
     "pathos>=0.3.3",
     "pytest>=8.3.4",
     "requests>=2.32.3",
+    "sea-serpent>=0.4.1",
     "simplejson>=3.20.1",
     "tensorstore>=0.1.72",
     "uvicorn[standard]>=0.34.0",
     "zarr>=3.0.4",
 ]
+
+[tool.uv.sources]
+nglscenes = { git = "https://github.com/schlegelp/nglscenes", rev = "main" }
