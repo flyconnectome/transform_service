@@ -5,13 +5,14 @@ import numpy as np
 
 from enum import Enum
 from typing import List, Tuple, Dict
-from starlette.concurrency import run_in_threadpool
-from fastapi import FastAPI, HTTPException, Response, Request
-from fastapi.responses import HTMLResponse, ORJSONResponse
 from fastapi.templating import Jinja2Templates
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
+from fastapi.responses import HTMLResponse, ORJSONResponse
+from fastapi import FastAPI, HTTPException, Response, Request
 
-from msgpack_asgi import MessagePackMiddleware
 from pydantic import BaseModel
+from msgpack_asgi import MessagePackMiddleware
 
 from . import config
 from .query import map_points, query_points
@@ -73,6 +74,15 @@ app = FastAPI(
 
 # MessagePackMiddleware does not currently support large request (`more_body`) so we'll do our own...
 app.add_middleware(MessagePackMiddleware)
+
+origins = ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # Main page of the service
