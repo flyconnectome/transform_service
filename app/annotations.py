@@ -40,7 +40,7 @@ def get_flywire_segmentation_properties(mat_version, labels, tags):
             cols_to_fetch.add(label.strip())
     else:
         cols_to_fetch.add(labels)
-        labels = f"{{labels}}"
+        labels = "{" + labels + "}"
 
     if tags:
         for tag in tags.split(","):
