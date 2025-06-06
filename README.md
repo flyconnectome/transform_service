@@ -20,7 +20,9 @@ uv env
 
 In order to use the annotation service, you will also need to setup environment variables:
 - `SEATABLE_SERVER`: URL for FlyTable
-- `SEATABLE_API_TOKEN`: API token for FlyTable
+- `SEATABLE_TOKEN`: API token for FlyTable
+
+Note to self: on `flyem1` I added these to the `gunicorn_start` script.
 
 ## Run the web service locally
 ```uv run uvicorn --reload app.main:app```
