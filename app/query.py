@@ -15,12 +15,6 @@ def query_points(dataset, scale, locs):
     n5 = datasource.get_datastore(dataset, scale)
     downsample = datasource.get_datastore_downsample(dataset, scale)
 
-    shape = (
-        n5.domain[0].inclusive_max,
-        n5.domain[1].inclusive_max,
-        n5.domain[2].inclusive_max,
-    )
-
     # TODO: There is probably a better way to get this from tensorstore?
     if info["type"] == "neuroglancer_precomputed":
         blocksize = (

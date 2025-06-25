@@ -16,7 +16,10 @@ from msgpack_asgi import MessagePackMiddleware
 
 from . import config
 from .query import map_points, query_points
-from .annotations import get_flywire_segmentation_properties
+from .annotations import (
+    get_flywire_segmentation_properties,
+    get_aedes_segmentation_properties,
+)
 
 
 API_DESCRIPTION = """
@@ -351,28 +354,56 @@ async def query_values_binary(
     return Response(content=data.tobytes(), media_type="application/octet-stream")
 
 
+# Datasets we currently allow to be mapped between
+ALLOWED_DATASETS = ["flywire", "aedes"]
+DatasetName = Enum("DatasetName", dict(zip(ALLOWED_DATASETS, ALLOWED_DATASETS)))
+
+
 @app.get(
-    "/segmentation_annotations/flywire/{version}/{labels}/info",
+    "/segmentation_annotations/{dataset}/{version}/{labels}/info",
     tags=["annotations"],
     response_model=Dict,
 )
 @app.get(
-    "/segmentation_annotations/flywire/{version}/{labels}/{tags}/info",
+    "/segmentation_annotations/{dataset}/{version}/{labels}/{tags}/info",
     tags=["annotations"],
     response_model=Dict,
 )
-async def flywire_segmentation_annotations(
+async def segmentation_annotations(
+    dataset: DatasetName,
     version: str,
     labels: str,
     request: Request,
     tags: str | None = None,
 ):
-    """Retrieve segmentation annotations for FlyWire."""
-    # This is a placeholder for the actual implementation.
-    # The implementation would typically query a database or an external service.
-    return get_flywire_segmentation_properties(
-        mat_version=version, labels=labels, tags=tags
-    )
+    """Generate segmentation properties from FlyTable."""
+    if dataset == DatasetName.flywire:
+        try:
+            return get_flywire_segmentation_properties(
+                mat_version=version, labels=labels, tags=tags
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=str(e),
+            )
+    elif dataset == DatasetName.aedes:
+        try:
+            return get_aedes_segmentation_properties(
+                mat_version=version, labels=labels, tags=tags
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=str(e),
+            )
+    else:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Dataset {dataset} not found. Available datasets: {ALLOWED_DATASETS}",
+        )
+
+
 
 # Catch all for all other paths for debugging
 # @app.api_route("/{path_name:path}", methods=["GET"])

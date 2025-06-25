@@ -7,6 +7,7 @@ import nglscenes as ngl
 import seaserpent as ss
 
 FLYWIRE_MAT_VERSION_TO_COL = {"630": "root_630", "783": "root_783", "live": "root_id"}
+AEDES_MAT_VERSION_TO_COL = {"live": "root_id"}
 BAD_STATUS = ("duplicate", "bad_nucleus")
 
 TABLES = {}
@@ -30,11 +31,64 @@ def get_flywire_segmentation_properties(mat_version, labels, tags):
         )
 
     # Get the tables
-    info, optic = get_tables()
+    info, optic = get_flywire_tables()
+
+    return _get_segmentation_properties(
+        tables=(info, optic),
+        labels=labels,
+        tags=tags,
+        id_col=FLYWIRE_MAT_VERSION_TO_COL[mat_version],
+    )
+
+
+def get_aedes_segmentation_properties(mat_version, labels, tags):
+    """Compile Neuroglancer segment properties for Aedes neurons.
+
+    Args:
+        mat_version (str): The version of the Aedes segmentation data.
+        labels (str): A string determining which labels to include and how to format.
+        tags (str): A string determining which tags to include and how to format.
+
+    Returns:
+        dict: A dict of dictionaries containing segment properties.
+
+    """
+    if mat_version not in AEDES_MAT_VERSION_TO_COL:
+        raise ValueError(
+            f"Invalid mat_version: {mat_version}. Must be one of {AEDES_MAT_VERSION_TO_COL}."
+        )
+
+    # Get the table
+    aedes = get_aedes_table()
+
+    return _get_segmentation_properties(
+        tables=(aedes,),
+        labels=labels,
+        tags=tags,
+        id_col=AEDES_MAT_VERSION_TO_COL[mat_version],
+    )
+
+
+def _get_segmentation_properties(tables, labels, tags, id_col):
+    """Compile Neuroglancer segment properties from the provided tables.
+
+    Args:
+        tables (tuple): A tuple containing one or more tables to concatenate.
+        labels (str): A string determining which labels to include and how to format.
+        tags (str): A string determining which tags to include and how to format.
+        id_col (str): The column name to use as the root ID.
+
+    Returns:
+        dict: A dict of dictionaries containing segment properties.
+
+    """
+    if isinstance(tables, ss.Table):
+        # If a single table is provided, convert it to a tuple
+        tables = (tables,)
 
     # Parse labels into columns
-    available_columns = info.columns
-    cols_to_fetch = {FLYWIRE_MAT_VERSION_TO_COL[mat_version]}
+    available_columns = tables[0].columns
+    cols_to_fetch = {id_col}
     backfills = []
     if "{" in labels:
         for label in re.findall(r"\{(.*?)\}", labels):
@@ -60,17 +114,14 @@ def get_flywire_segmentation_properties(mat_version, labels, tags):
     for col in cols_to_fetch:
         if col not in available_columns:
             raise ValueError(
-                f"Invalid label column: {col}. Available columns: {available_columns}"
+                f"Invalid label column: '{col}' does not exist in table(s). Available columns: {available_columns}"
             )
 
     # Fetch the data
     data = pd.concat(
-        [
-            info.loc[~info.status.isin(BAD_STATUS), list(cols_to_fetch)],
-            optic.loc[~optic.status.isin(BAD_STATUS), list(cols_to_fetch)],
-        ],
+        [t.loc[~t.status.isin(BAD_STATUS), list(cols_to_fetch)] for t in tables],
         axis=0,
-    ).rename(columns={FLYWIRE_MAT_VERSION_TO_COL[mat_version]: "root_id"})
+    ).rename(columns={id_col: "root_id"})
 
     # Some clean-ups
     data = data.drop_duplicates(subset="root_id")
@@ -102,8 +153,8 @@ def get_flywire_segmentation_properties(mat_version, labels, tags):
     return props.as_dict()
 
 
-def get_tables():
-    """Return seaserpent.Tables object connected to the info and optic lobes table.
+def get_flywire_tables():
+    """Return seaserpent.Tables object connected to the FlyWire (info + optic lobes) tables.
 
     The tables are cached, so this function will return the same object if called again
     from the same thread with the same arguments.
@@ -114,11 +165,31 @@ def get_tables():
     pid = os.getpid()
 
     try:
-        info, optic = TABLES[(thread_id, pid)]
+        info, optic = TABLES[("flywire", thread_id, pid)]
     except KeyError:
         info = ss.Table("info", "main")
         optic = ss.Table("optic", "optic_lobes")
 
-        TABLES[(thread_id, pid)] = (info, optic)
+        TABLES[("flywire", thread_id, pid)] = (info, optic)
 
     return info, optic
+
+
+def get_aedes_table():
+    """Return seaserpent.Tables object connected to the Aedes table.
+
+    The tables are cached, so this function will return the same object if called again
+    from the same thread with the same arguments.
+    """
+    # Technically, request sessions are not threadsafe,
+    # so we keep one for each thread.
+    thread_id = threading.current_thread().ident
+    pid = os.getpid()
+
+    try:
+        aedes = TABLES[("aedes", thread_id, pid)]
+    except KeyError:
+        aedes = ss.Table("aedes_main", "aedes")
+        TABLES[("aedes", thread_id, pid)] = aedes
+
+    return aedes
