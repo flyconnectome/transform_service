@@ -1,10 +1,14 @@
-# Coordinate Query & Conversion Service
+# Connectome Services
 
-This code is based on [CloudVolumeServer](https://github.com/flyconnectome/CloudVolumeServer).
+This repository contains code for running various connectome-related services related currently deployed
+on `flyem.mrc-lmb.cam.ac.uk` (internally `flyem1`):
+
+- a supervoxel look-up service for the Zheng et al. CA3 volume
+- a service for dynamically generating neuroglancer segmentation properties from tables on flytable
 
 ## Requirements
 
-This project uses [`uv`](https://github.com/astral-sh/uv) to manage dependencies and the virtual environment.
+The project uses [`uv`](https://github.com/astral-sh/uv) to manage dependencies and the virtual environment.
 
 ```bash
 # Run to setup dependencies
@@ -18,11 +22,11 @@ If you are running this server in production, you probably want a virtual enviro
 uv env
 ```
 
-In order to use the annotation service, you will also need to setup environment variables:
+In order to use the segment property service, you will also need to setup environment variables:
 - `SEATABLE_SERVER`: URL for FlyTable
 - `SEATABLE_TOKEN`: API token for FlyTable
 
-Note to self: on `flyem1` I added these to the `gunicorn_start` script.
+_Note to self: on `flyem1` I added these to the `gunicorn_start` script._
 
 ## Run the web service locally
 ```uv run uvicorn --reload app.main:app```
@@ -32,10 +36,14 @@ Note to self: on `flyem1` I added these to the `gunicorn_start` script.
 
 ## Run in production
 
-We deployed this service using:
+We deployed this service on `flyem1` using:
 
 - `gunicorn` as the webserver
 - `supervisor` as the process control system for the gunicorn server
 - a reverse proxy set up in `nginx` forwarding requests to the gunicorn webserver
 
-Please see [this tutorial](https://dylancastillo.co/posts/fastapi-nginx-gunicorn.html) for step-by-step instructions.
+Please see [this tutorial](https://dylancastillo.co/posts/fastapi-nginx-gunicorn.html) for general step-by-step instructions.
+
+[This Slack message](https://flyconnectome.slack.com/archives/C29G9694H/p1740648367149559) contains details on how
+the service is currently deployed on `flyem1`.
+
