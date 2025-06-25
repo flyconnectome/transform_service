@@ -7,6 +7,7 @@ requires-python = ">=3.11.8"
 dependencies = [
     "blosc>=1.11.2",
     "fastapi>=0.115.8",
+    "gunicorn>=23.0.0",
     "httpx>=0.28.1",
     "jinja2>=3.1.5",
     "msgpack>=1.1.0",
