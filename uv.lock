@@ -2271,7 +2271,7 @@ wheels = [
 
 [[package]]
 name = "sea-serpent"
-version = "0.4.1"
+version = "0.4.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
@@ -2281,9 +2281,9 @@ dependencies = [
     { name = "seatable-api" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/86/69/096c4eb5884fb81e82d0876d9bca9d816e92da13b6c2cf8b72577ace6656/sea_serpent-0.4.1.tar.gz", hash = "sha256:5979f9121cc42d1ca75040540a8a9644ad5ac26f07f056e637ea45d1a0d26b19", size = 44440 }
+sdist = { url = "https://files.pythonhosted.org/packages/8a/a3/669cf7c83a300a739963c7d654f1467eb6136088bfc8e649b1fb4a63c01b/sea_serpent-0.4.2.tar.gz", hash = "sha256:86d95bbb366a7b543758331ca8f7a90cc21131846af662d9412353323b020468", size = 44952 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2f/fa/ea6261598296a7d744f48f1dea2e4b1ce5a6239fea3c5f48c8a4b3f4f6c2/sea_serpent-0.4.1-py3-none-any.whl", hash = "sha256:ecab929392af4003d792e3999d8097ca61f28adae34ed8890893f1a1a5b89920", size = 45918 },
+    { url = "https://files.pythonhosted.org/packages/7c/96/52e4a253032ad2f1046a2d6495b23e569e5f9ccafabaf1140c54ed2f6883/sea_serpent-0.4.2-py3-none-any.whl", hash = "sha256:5e723410d57d799ef3c59b96f6e543a95a8d4eab88c3fdaf07acce69572bee64", size = 46444 },
 ]
 
 [[package]]
@@ -2536,7 +2536,7 @@ requires-dist = [
     { name = "pathos", specifier = ">=0.3.3" },
     { name = "pytest", specifier = ">=8.3.4" },
     { name = "requests", specifier = ">=2.32.3" },
-    { name = "sea-serpent", specifier = ">=0.4.1" },
+    { name = "sea-serpent", specifier = ">=0.4.2" },
     { name = "simplejson", specifier = ">=3.20.1" },
     { name = "tensorstore", specifier = ">=0.1.72" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
