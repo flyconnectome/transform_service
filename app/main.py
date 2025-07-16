@@ -19,6 +19,7 @@ from .query import map_points, query_points
 from .annotations import (
     get_flywire_segmentation_properties,
     get_aedes_segmentation_properties,
+    get_zhengCA3_segmentation_properties
 )
 
 
@@ -355,7 +356,7 @@ async def query_values_binary(
 
 
 # Datasets we currently allow to be mapped between
-ALLOWED_DATASETS = ["flywire", "aedes"]
+ALLOWED_DATASETS = ["flywire", "aedes", "zhengCA3"]
 DatasetName = Enum("DatasetName", dict(zip(ALLOWED_DATASETS, ALLOWED_DATASETS)))
 
 
@@ -390,6 +391,16 @@ async def segmentation_annotations(
     elif dataset == DatasetName.aedes:
         try:
             return get_aedes_segmentation_properties(
+                mat_version=version, labels=labels, tags=tags
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=str(e),
+            )
+    elif dataset == DatasetName.zhengCA3:
+        try:
+            return get_zhengCA3_segmentation_properties(
                 mat_version=version, labels=labels, tags=tags
             )
         except ValueError as e:
