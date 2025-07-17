@@ -8,6 +8,7 @@ import seaserpent as ss
 
 FLYWIRE_MAT_VERSION_TO_COL = {"630": "root_630", "783": "root_783", "live": "root_id"}
 AEDES_MAT_VERSION_TO_COL = {"live": "root_id"}
+ZHENGCA3_MAT_VERSION_TO_COL = {"live": "root_id"}
 BAD_STATUS = ("duplicate", "bad_nucleus")
 
 TABLES = {}
@@ -68,6 +69,34 @@ def get_aedes_segmentation_properties(mat_version, labels, tags):
         id_col=AEDES_MAT_VERSION_TO_COL[mat_version],
     )
 
+    
+def get_zhengCA3_segmentation_properties(mat_version, labels, tags):
+    """Compile Neuroglancer segment properties for ZhengCA3 neurons.
+
+    Args:
+        mat_version (str): The version of the ZhengCA3 segmentation data.
+        labels (str): A string determining which labels to include and how to format.
+        tags (str): A string determining which tags to include and how to format.
+
+    Returns:
+        dict: A dict of dictionaries containing segment properties.
+
+    """
+    if mat_version not in ZHENGCA3_MAT_VERSION_TO_COL:
+        raise ValueError(
+            f"Invalid mat_version: {mat_version}. Must be one of {ZHENGCA3_MAT_VERSION_TO_COL}."
+        )
+
+    # Get the tables
+    zhengCA3 = get_zhengCA3_table()
+
+    return _get_segmentation_properties(
+        tables=(zhengCA3),
+        labels=labels,
+        tags=tags,
+        id_col=ZHENGCA3_MAT_VERSION_TO_COL[mat_version],
+    )
+
 
 def _get_segmentation_properties(tables, labels, tags, id_col):
     """Compile Neuroglancer segment properties from the provided tables.
@@ -118,10 +147,15 @@ def _get_segmentation_properties(tables, labels, tags, id_col):
             )
 
     # Fetch the data
-    data = pd.concat(
-        [t.loc[~t.status.isin(BAD_STATUS), list(cols_to_fetch)] for t in tables],
-        axis=0,
-    ).rename(columns={id_col: "root_id"})
+    if "status" in available_columns:
+        data = pd.concat(
+            [t.loc[~t.status.isin(BAD_STATUS), list(cols_to_fetch)] for t in tables],
+            axis=0,
+        ).rename(columns={id_col: "root_id"})
+    else:
+        data = pd.concat(
+            [t[list(cols_to_fetch)] for t in tables], axis=0
+        ).rename(columns={id_col: "root_id"})
 
     # Some clean-ups
     data = data.drop_duplicates(subset="root_id")
@@ -193,3 +227,22 @@ def get_aedes_table():
         TABLES[("aedes", thread_id, pid)] = aedes
 
     return aedes
+
+def get_zhengCA3_table():
+    """Return seaserpent.Tables object connected to the ZhengCA3 table.
+
+    The tables are cached, so this function will return the same object if called again
+    from the same thread with the same arguments.
+    """
+    # Technically, request sessions are not threadsafe,
+    # so we keep one for each thread.
+    thread_id = threading.current_thread().ident
+    pid = os.getpid()
+
+    try:
+        zhengCA3 = TABLES[("zhengCA3", thread_id, pid)]
+    except KeyError:
+        zhengCA3 = ss.Table("annotations", "zheng_ca3")
+        TABLES[("zhengCA3", thread_id, pid)] = zhengCA3
+
+    return zhengCA3
