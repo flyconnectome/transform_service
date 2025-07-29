@@ -170,6 +170,7 @@ def _get_segmentation_properties(tables, labels, tags, id_col):
     data = data[data.root_id.notnull()]
     data = data[data.root_id.apply(is_int)]
     # Second, remove duplicates
+    data.sort_values([c for c in data.columns if c != 'root_id'], inplace=True, ignore_index=True)
     data = data.drop_duplicates(subset="root_id")
 
     # Generate backfills if needed
