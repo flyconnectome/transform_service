@@ -69,7 +69,7 @@ def get_aedes_segmentation_properties(mat_version, labels, tags):
         id_col=AEDES_MAT_VERSION_TO_COL[mat_version],
     )
 
-    
+
 def get_zhengCA3_segmentation_properties(mat_version, labels, tags):
     """Compile Neuroglancer segment properties for ZhengCA3 neurons.
 
@@ -153,11 +153,23 @@ def _get_segmentation_properties(tables, labels, tags, id_col):
             axis=0,
         ).rename(columns={id_col: "root_id"})
     else:
-        data = pd.concat(
-            [t[list(cols_to_fetch)] for t in tables], axis=0
-        ).rename(columns={id_col: "root_id"})
+        data = pd.concat([t[list(cols_to_fetch)] for t in tables], axis=0).rename(
+            columns={id_col: "root_id"}
+        )
 
     # Some clean-ups
+    # First, check for malformed root IDs
+    def is_int(value):
+        """Check if a value can be converted to an integer."""
+        try:
+            int(value)
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    data = data[data.root_id.notnull()]
+    data = data[data.root_id.apply(is_int)]
+    # Second, remove duplicates
     data = data.drop_duplicates(subset="root_id")
 
     # Generate backfills if needed
@@ -227,6 +239,7 @@ def get_aedes_table():
         TABLES[("aedes", thread_id, pid)] = aedes
 
     return aedes
+
 
 def get_zhengCA3_table():
     """Return seaserpent.Tables object connected to the ZhengCA3 table.
