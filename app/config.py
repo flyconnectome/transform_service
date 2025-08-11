@@ -46,4 +46,22 @@ DATASOURCES = {
             },
         },
     },
+    "wclee_aedes_brain": {
+        "description": "super voxel segmentation of the mosquito whole brain [wclee_aedes_brain]",
+        "type": "neuroglancer_precomputed",
+        "scales": [
+            0
+        ],  # the dataset has mip 0 and 1 but I only downloaded mip 0 so far
+        "voxel_size": [16, 16, 45],
+        "services": ["query"],
+        "dtype": "uint64",
+        "width": 1,
+        "tsinfo": {
+            "driver": "neuroglancer_precomputed",
+            "kvstore": {
+                "driver": "file",
+                "path": "segmentation/wclee_aedes_brain",
+            },
+        },
+    },
 }
