@@ -19,7 +19,7 @@ dependencies = [
     "pathos>=0.3.3",
     "pytest>=8.3.4",
     "requests>=2.32.3",
-    "sea-serpent>=0.4.2",
+    "sea-serpent==0.4.3",
     "simplejson>=3.20.1",
     "tensorstore>=0.1.72",
     "uvicorn[standard]>=0.34.0",
