@@ -116,7 +116,6 @@ def _get_segmentation_properties(tables, labels, tags, id_col):
         tables = (tables,)
 
     # Parse labels into columns
-    available_columns = tables[0].columns
     cols_to_fetch = {id_col}
     backfills = []
     if "{" in labels:
@@ -140,11 +139,16 @@ def _get_segmentation_properties(tables, labels, tags, id_col):
         for tag in tags.split(","):
             cols_to_fetch.add(tag.strip())
 
+    available_columns = tables[0].columns
     for col in cols_to_fetch:
         if col not in available_columns:
-            raise ValueError(
-                f"Invalid label column: '{col}' does not exist in table(s). Available columns: {available_columns}"
-            )
+            # Try one time to update available columns
+            _ = tables[0].fetch_meta()
+            available_columns = tables[0].columns
+            if col not in available_columns:
+                raise ValueError(
+                    f"Invalid label column: '{col}' does not exist in table(s). Available columns: {available_columns}"
+                )
 
     # Fetch the data
     if "status" in available_columns:
