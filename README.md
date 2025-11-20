@@ -47,3 +47,9 @@ Please see [this tutorial](https://dylancastillo.co/posts/fastapi-nginx-gunicorn
 [This Slack message](https://flyconnectome.slack.com/archives/C29G9694H/p1740648367149559) contains details on how
 the service is currently deployed on `flyem1`.
 
+To restart the service (e.g. after changing the code), you can run:
+
+```bash
+sudo supervisorctl restart transform_service
+```
+
