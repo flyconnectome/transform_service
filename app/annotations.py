@@ -8,6 +8,7 @@ import seaserpent as ss
 
 FLYWIRE_MAT_VERSION_TO_COL = {"630": "root_630", "783": "root_783", "live": "root_id"}
 AEDES_MAT_VERSION_TO_COL = {"live": "root_id"}
+FANC_MAT_VERSION_TO_COL = {"live": "root_id"}
 ZHENGCA3_MAT_VERSION_TO_COL = {"live": "root_id"}
 BAD_STATUS = ("duplicate", "bad_nucleus")
 
@@ -67,6 +68,34 @@ def get_aedes_segmentation_properties(mat_version, labels, tags):
         labels=labels,
         tags=tags,
         id_col=AEDES_MAT_VERSION_TO_COL[mat_version],
+    )
+
+
+def get_fanc_segmentation_properties(mat_version, labels, tags):
+    """Compile Neuroglancer segment properties for FANC neurons.
+
+    Args:
+        mat_version (str): The version of the FANC segmentation data.
+        labels (str): A string determining which labels to include and how to format.
+        tags (str): A string determining which tags to include and how to format.
+
+    Returns:
+        dict: A dict of dictionaries containing segment properties.
+
+    """
+    if mat_version not in FANC_MAT_VERSION_TO_COL:
+        raise ValueError(
+            f"Invalid mat_version: {mat_version}. Must be one of {FANC_MAT_VERSION_TO_COL}."
+        )
+
+    # Get the table
+    fanc = get_fanc_table()
+
+    return _get_segmentation_properties(
+        tables=(fanc,),
+        labels=labels,
+        tags=tags,
+        id_col=FANC_MAT_VERSION_TO_COL[mat_version],
     )
 
 
@@ -173,6 +202,7 @@ def _get_segmentation_properties(tables, labels, tags, id_col):
 
     data = data[data.root_id.notnull()]
     data = data[data.root_id.apply(is_int)]
+
     # Second, remove duplicates
     data.sort_values([c for c in data.columns if c != 'root_id'], inplace=True, ignore_index=True)
     data = data.drop_duplicates(subset="root_id")
@@ -244,6 +274,26 @@ def get_aedes_table():
         TABLES[("aedes", thread_id, pid)] = aedes
 
     return aedes
+
+
+def get_fanc_table():
+    """Return seaserpent.Tables object connected to the FANC table.
+
+    The tables are cached, so this function will return the same object if called again
+    from the same thread with the same arguments.
+    """
+    # Technically, request sessions are not threadsafe,
+    # so we keep one for each thread.
+    thread_id = threading.current_thread().ident
+    pid = os.getpid()
+
+    try:
+        fanc = TABLES[("fanc", thread_id, pid)]
+    except KeyError:
+        fanc = ss.Table("fanc_main", "fanc")
+        TABLES[("fanc", thread_id, pid)] = fanc
+
+    return fanc
 
 
 def get_zhengCA3_table():

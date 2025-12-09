@@ -19,7 +19,8 @@ from .query import map_points, query_points
 from .annotations import (
     get_flywire_segmentation_properties,
     get_aedes_segmentation_properties,
-    get_zhengCA3_segmentation_properties
+    get_fanc_segmentation_properties,
+    get_zhengCA3_segmentation_properties,
 )
 
 
@@ -356,8 +357,14 @@ async def query_values_binary(
 
 
 # Datasets we currently allow to be mapped between
-ALLOWED_DATASETS = ["flywire", "aedes", "zhengCA3"]
+ALLOWED_DATASETS = ["flywire", "aedes", "zhengCA3", "fanc"]
 DatasetName = Enum("DatasetName", dict(zip(ALLOWED_DATASETS, ALLOWED_DATASETS)))
+DATASET_FUNCS = {
+    "flywire": get_flywire_segmentation_properties,
+    "aedes": get_aedes_segmentation_properties,
+    "zhengCA3": get_zhengCA3_segmentation_properties,
+    "fanc": get_fanc_segmentation_properties,
+}
 
 
 @app.get(
@@ -378,42 +385,21 @@ async def segmentation_annotations(
     tags: str | None = None,
 ):
     """Generate segmentation properties from FlyTable."""
-    if dataset == DatasetName.flywire:
-        try:
-            return get_flywire_segmentation_properties(
-                mat_version=version, labels=labels, tags=tags
-            )
-        except ValueError as e:
-            raise HTTPException(
-                status_code=400,
-                detail=str(e),
-            )
-    elif dataset == DatasetName.aedes:
-        try:
-            return get_aedes_segmentation_properties(
-                mat_version=version, labels=labels, tags=tags
-            )
-        except ValueError as e:
-            raise HTTPException(
-                status_code=400,
-                detail=str(e),
-            )
-    elif dataset == DatasetName.zhengCA3:
-        try:
-            return get_zhengCA3_segmentation_properties(
-                mat_version=version, labels=labels, tags=tags
-            )
-        except ValueError as e:
-            raise HTTPException(
-                status_code=400,
-                detail=str(e),
-            )
-    else:
+    if dataset.value not in DATASET_FUNCS:
         raise HTTPException(
             status_code=404,
             detail=f"Dataset {dataset} not found. Available datasets: {ALLOWED_DATASETS}",
         )
-
+    dataset_func = DATASET_FUNCS[dataset.value]
+    try:
+        return dataset_func(
+            mat_version=version, labels=labels, tags=tags
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e),
+        )
 
 
 # Catch all for all other paths for debugging
