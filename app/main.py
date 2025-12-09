@@ -102,7 +102,7 @@ async def dataset_info():
     cleaned_datasets = {}
     for k, info in config.DATASOURCES.items():
         cleaned_datasets[k] = {}
-        for field in ("scales", "voxel_size", "description"):
+        for field in ("scales", "voxel_size", "description", "dtype"):
             cleaned_datasets[k][field] = info.get(field, None)
 
     return cleaned_datasets
