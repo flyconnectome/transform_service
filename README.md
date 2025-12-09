@@ -4,6 +4,7 @@ This repository contains code for running various connectome-related services re
 on `flyem.mrc-lmb.cam.ac.uk` (internally `flyem1`):
 
 - a supervoxel look-up service for the Zheng et al. CA3 volume
+- a supervoxel look-up service for the Aedes aegypti EM volume
 - a service for dynamically generating neuroglancer segmentation properties from tables on flytable
 
 ## Requirements
