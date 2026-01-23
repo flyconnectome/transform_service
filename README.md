@@ -51,6 +51,6 @@ the service is currently deployed on `flyem1`.
 To restart the service (e.g. after changing the code), you can run:
 
 ```bash
-sudo supervisorctl restart transform_service
+sudo supervisorctl restart transform-service
 ```
 
