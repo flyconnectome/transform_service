@@ -6,7 +6,8 @@ import pandas as pd
 import nglscenes as ngl
 import seaserpent as ss
 
-FLYWIRE_MAT_VERSION_TO_COL = {"630": "root_630", "783": "root_783", "live": "root_id"}
+FLYWIRE_MAT_VERSION_TO_COL = {"630": "root_630", "783": "root_783", "live": "root_id", "public": "root_783"}
+BANC_MAT_VERSION_TO_COL = {"746": "root_746", "public": "root_746",  "live": "root_id"} # note that "root_id" is currently not actually updated
 AEDES_MAT_VERSION_TO_COL = {"live": "root_id"}
 FANC_MAT_VERSION_TO_COL = {"live": "root_id"}
 ZHENGCA3_MAT_VERSION_TO_COL = {"live": "root_id"}
@@ -96,6 +97,34 @@ def get_fanc_segmentation_properties(mat_version, labels, tags):
         labels=labels,
         tags=tags,
         id_col=FANC_MAT_VERSION_TO_COL[mat_version],
+    )
+
+
+def get_banc_segmentation_properties(mat_version, labels, tags):
+    """Compile Neuroglancer segment properties for BANC neurons.
+
+    Args:
+        mat_version (str): The version of the BANC segmentation data.
+        labels (str): A string determining which labels to include and how to format.
+        tags (str): A string determining which tags to include and how to format.
+
+    Returns:
+        dict: A dict of dictionaries containing segment properties.
+
+    """
+    if mat_version not in BANC_MAT_VERSION_TO_COL:
+        raise ValueError(
+            f"Invalid mat_version: {mat_version}. Must be one of {BANC_MAT_VERSION_TO_COL}."
+        )
+
+    # Get the table
+    banc = get_banc_table()
+
+    return _get_segmentation_properties(
+        tables=(banc,),
+        labels=labels,
+        tags=tags,
+        id_col=BANC_MAT_VERSION_TO_COL[mat_version],
     )
 
 
@@ -254,6 +283,26 @@ def get_flywire_tables():
         TABLES[("flywire", thread_id, pid)] = (info, optic)
 
     return info, optic
+
+
+def get_banc_table():
+    """Return seaserpent.Tables object connected to the BANC table.
+
+    The tables are cached, so this function will return the same object if called again
+    from the same thread with the same arguments.
+    """
+    # Technically, request sessions are not threadsafe,
+    # so we keep one for each thread.
+    thread_id = threading.current_thread().ident
+    pid = os.getpid()
+
+    try:
+        banc = TABLES[("banc", thread_id, pid)]
+    except KeyError:
+        banc = ss.Table("banc_main", "banc")
+        TABLES[("banc", thread_id, pid)] = banc
+
+    return banc
 
 
 def get_aedes_table():

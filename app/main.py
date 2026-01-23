@@ -21,6 +21,7 @@ from .annotations import (
     get_aedes_segmentation_properties,
     get_fanc_segmentation_properties,
     get_zhengCA3_segmentation_properties,
+    get_banc_segmentation_properties,
 )
 
 
@@ -357,14 +358,23 @@ async def query_values_binary(
 
 
 # Datasets we currently allow to be mapped between
-ALLOWED_DATASETS = ["flywire", "aedes", "zhengCA3", "fanc"]
+ALLOWED_DATASETS = ["flywire", "aedes", "zhengCA3", "fanc", "banc"]
 DatasetName = Enum("DatasetName", dict(zip(ALLOWED_DATASETS, ALLOWED_DATASETS)))
 DATASET_FUNCS = {
     "flywire": get_flywire_segmentation_properties,
     "aedes": get_aedes_segmentation_properties,
     "zhengCA3": get_zhengCA3_segmentation_properties,
     "fanc": get_fanc_segmentation_properties,
+    "banc": get_banc_segmentation_properties,
 }
+
+@app.get(
+    "/segmentation_annotations/datasets",
+    response_model=List[str],
+)
+async def segmentation_datasets():
+    """Return list of available segmentation annotation datasets."""
+    return ALLOWED_DATASETS
 
 
 @app.get(
@@ -392,9 +402,7 @@ async def segmentation_annotations(
         )
     dataset_func = DATASET_FUNCS[dataset.value]
     try:
-        return dataset_func(
-            mat_version=version, labels=labels, tags=tags
-        )
+        return dataset_func(mat_version=version, labels=labels, tags=tags)
     except ValueError as e:
         raise HTTPException(
             status_code=400,
