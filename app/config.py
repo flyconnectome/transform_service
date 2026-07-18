@@ -154,8 +154,8 @@ DATASOURCES = {
         "description": "super voxel segmentation of the mosquito whole brain [wclee_aedes_brain]",
         "type": "neuroglancer_precomputed",
         "scales": [
-            0
-        ],  # the dataset has mip 0 and 1 but I only downloaded mip 0 so far
+            1
+        ],  # the dataset has mip 0 and 1 but I only downloaded mip 1 so far
         "voxel_size": [16, 16, 45],
         "services": ["query", "sparsevol"],
         "graphene": "graphene://https://cave.fanc-fly.com/segmentation/table/wclee_aedes_brain",
