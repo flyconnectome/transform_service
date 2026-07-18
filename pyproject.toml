@@ -6,6 +6,9 @@ readme = "README.md"
 requires-python = ">=3.11.8"
 dependencies = [
     "blosc>=1.11.2",
+    # Used by the sparsevol service: CloudFiles for ranged reads against the
+    # fragment store, and the graphene frontend to resolve root IDs.
+    "cloud-volume>=12.3.1",
     "fastapi>=0.115.8",
     "gunicorn>=23.0.0",
     "httpx>=0.28.1",

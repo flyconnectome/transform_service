@@ -1,5 +1,8 @@
 __pycache__
 *.py[cod]
+sparsevol_index
+sparsevol_test_index
+sparsevol_test_volume
 .vscode
 *.log
 .pytest*

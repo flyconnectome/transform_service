@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import gzip
+import io
 import os
 
 import numpy as np
@@ -15,6 +17,9 @@ from pydantic import BaseModel
 from msgpack_asgi import MessagePackMiddleware
 
 from . import config
+from . import sparsevol
+from . import sparsevol_live
+from .rle import decode_rle
 from .query import map_points, query_points
 from .annotations import (
     get_flywire_segmentation_properties,
@@ -62,6 +67,13 @@ TAGS_METADATA = [
         "name": "annotations",
         "description": "Retrieve segmentation annotations for FlyWire neurons",
     },
+    {
+        "name": "sparsevol",
+        "description": (
+            "Sparse voxels for a segment, as run-length encoded runs, served "
+            "from a precomputed supervoxel index. No dense image data is read."
+        ),
+    },
     {"name": "other"},
     {"name": "deprecated"},
 ]
@@ -75,7 +87,7 @@ app = FastAPI(
     # we need to set a root path b/c we're running this behind a nginx proxy which
     # adds "/transform-service" as prefix to all routes
     root_path="/transform-service",
-    debug=False,  # turn on for debugging
+    debug=True,  # turn on for debugging
 )
 
 # MessagePackMiddleware does not currently support large request (`more_body`) so we'll do our own...
@@ -408,6 +420,219 @@ async def segmentation_annotations(
             status_code=400,
             detail=str(e),
         )
+
+
+# ---------------------------------------------------------------------------
+# Sparse voxels (supervoxel -> RLE index)
+#
+# A segment's voxels are served by unioning precomputed per-supervoxel RLE
+# fragments, never by reading the segmentation. The dense read happens once,
+# offline, when the index is built.
+# ---------------------------------------------------------------------------
+
+# Two backends answer the same questions. "live" reads the locally-stored
+# segmentation and sparsifies per request; "index" reads precomputed fragments.
+# Which one a dataset uses is a deployment detail, so it is not in the URL --
+# the response is identical either way.
+SPARSEVOL_LIVE_DATASETS = [
+    name
+    for name, info in config.DATASOURCES.items()
+    if "sparsevol" in info.get("services", [])
+]
+_collisions = set(config.SPARSEVOL_DATASOURCES) & set(SPARSEVOL_LIVE_DATASETS)
+if _collisions:
+    # Otherwise one silently shadows the other and requests go to a backend
+    # the operator did not choose.
+    raise RuntimeError(
+        "Dataset name(s) {} are configured both as a sparsevol index and as a "
+        "live sparsevol source. Names must be unique across the two.".format(
+            sorted(_collisions)
+        )
+    )
+
+SPARSEVOL_DATASETS = list(config.SPARSEVOL_DATASOURCES) + SPARSEVOL_LIVE_DATASETS
+
+SparseVolDataSet = Enum(
+    "SparseVolDataSet", dict(zip(SPARSEVOL_DATASETS, SPARSEVOL_DATASETS))
+)
+
+
+def sparsevol_backend(dataset):
+    """The module answering for this dataset. Both expose the same two calls."""
+    return sparsevol_live if dataset in SPARSEVOL_LIVE_DATASETS else sparsevol
+
+
+class SparseVolFormat(str, Enum):
+    rle = "rle"  # binary (M, 4) int32: x, y, z, length
+    npy = "npy"  # the same array as a .npy file
+    json = "json"  # runs plus stats as JSON
+    coords = "coords"  # binary (N, 3) int32, one row per voxel
+
+
+class SuperVoxelList(BaseModel):
+    # Strings as well as ints: supervoxel IDs are uint64 and lose precision in
+    # a JavaScript client the moment they exceed 2^53.
+    supervoxels: List[int | str]
+
+
+SPARSEVOL_RESPONSES = {
+    200: {
+        "content": {"application/octet-stream": {}},
+        "description": (
+            "Run-length encoded voxels. Response headers carry what the "
+            "request cost: X-Sparsevol-Runs, -Voxels, -Supervoxels, "
+            "-Fragments, -Missing, -Chunks, -Reads, -Bytes, -Seconds."
+        ),
+    }
+}
+
+
+def stats_headers(stats):
+    """Turn a backend's stats into headers.
+
+    Derived from the stats object rather than listed here, because the two
+    backends account for different things -- one counts bytes fetched from a
+    store, the other counts voxels read and discarded -- and the response
+    should report whichever actually happened.
+    """
+    headers = {}
+    for key, value in stats.as_dict().items():
+        # n_range_reads -> X-Sparsevol-Range-Reads
+        name = key[2:] if key.startswith("n_") else key
+        name = "-".join(part.capitalize() for part in name.split("_"))
+        headers["X-Sparsevol-" + name] = str(value)
+    return headers
+
+
+def sparsevol_response(runs, stats, fmt, request):
+    """Serialize runs, preferring formats that keep the response small."""
+    headers = stats_headers(stats)
+
+    if fmt == SparseVolFormat.json:
+        return ORJSONResponse(
+            {"runs": runs.tolist(), "stats": stats.as_dict()}, headers=headers
+        )
+
+    if fmt == SparseVolFormat.coords:
+        # Every voxel spelled out. Offered because some clients want it, but it
+        # is the largest thing this service can return -- prefer 'rle'.
+        array = decode_rle(runs).astype("<i4")
+    else:
+        array = runs.astype("<i4")
+
+    if fmt == SparseVolFormat.npy:
+        buffer = io.BytesIO()
+        np.save(buffer, array, allow_pickle=False)
+        content = buffer.getvalue()
+    else:
+        content = np.ascontiguousarray(array).tobytes()
+
+    # Runs are sorted by (z, y, x), so three of the four columns barely change
+    # down the array and gzip does well on them. Worth the CPU on a response
+    # that can run to megabytes.
+    if "gzip" in request.headers.get("accept-encoding", ""):
+        content = gzip.compress(content, compresslevel=6)
+        headers["Content-Encoding"] = "gzip"
+
+    return Response(
+        content=content, media_type="application/octet-stream", headers=headers
+    )
+
+
+@app.get("/sparsevol/datasets", tags=["sparsevol"], response_model=Dict)
+async def sparsevol_datasets():
+    """Datasets that can return sparse voxels, and the scales they cover.
+
+    `mode` is how the answer is produced: `live` sparsifies the locally-stored
+    segmentation per request, `index` reads precomputed fragments. It does not
+    change the request or the response.
+    """
+    datasets = {}
+    for name in SPARSEVOL_DATASETS:
+        live = name in SPARSEVOL_LIVE_DATASETS
+        info = config.DATASOURCES[name] if live else config.SPARSEVOL_DATASOURCES[name]
+        datasets[name] = {
+            "mode": "live" if live else "index",
+            **{
+                field: info.get(field)
+                for field in ("description", "scales", "voxel_size")
+            },
+        }
+    return datasets
+
+
+@app.get(
+    "/sparsevol/dataset/{dataset}/s/{scale}/root/{root_id}",
+    response_model=None,
+    responses=SPARSEVOL_RESPONSES,
+    tags=["sparsevol"],
+)
+async def sparsevol_root(
+    dataset: SparseVolDataSet,
+    scale: int,
+    root_id: int,
+    request: Request,
+    fmt: SparseVolFormat = SparseVolFormat.rle,
+):
+    """Sparse voxels for a root ID.
+
+    Asks the chunkedgraph which chunks the neuron occupies and which
+    supervoxels belong to it, then either reads and masks those chunks from the
+    local segmentation or unions precomputed fragments, depending on the
+    dataset. Either way the segmentation itself never crosses the wire.
+
+    Coordinates are voxels at the requested scale; multiply by the dataset's
+    voxel size (scaled by 2^scale in x and y) for nanometres.
+
+    Root IDs are immutable -- an edit mints a new one -- so a result may be
+    cached indefinitely against `(root_id, scale)`.
+    """
+    runs, stats = await run_in_threadpool(
+        sparsevol_backend(dataset.value).root_to_runs, dataset.value, scale, root_id
+    )
+    return sparsevol_response(runs, stats, fmt, request)
+
+
+@app.post(
+    "/sparsevol/dataset/{dataset}/s/{scale}/supervoxels",
+    response_model=None,
+    responses=SPARSEVOL_RESPONSES,
+    tags=["sparsevol"],
+)
+async def sparsevol_supervoxels(
+    dataset: SparseVolDataSet,
+    scale: int,
+    data: SuperVoxelList,
+    request: Request,
+    fmt: SparseVolFormat = SparseVolFormat.rle,
+):
+    """Sparse voxels for an explicit list of supervoxel IDs.
+
+    The chunk a supervoxel lives in is packed into its ID, so this path never
+    calls the chunkedgraph at all -- it is the root endpoint minus the manifest
+    lookup. Use it when you already hold a manifest, want part of a neuron, or
+    are asking about supervoxels the graph would not group together.
+
+    Supervoxel IDs that resolve to nothing are skipped and counted rather than
+    failing the request.
+    """
+    try:
+        sv_ids = [int(sv) for sv in data.supervoxels]
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Supervoxel IDs must be integers")
+
+    # Anything outside uint64 is not a label. Caught here because numpy would
+    # otherwise either raise deep in the request or wrap a negative ID round to
+    # a plausible-looking one and report it as merely missing.
+    if any(sv < 0 or sv >= 2**64 for sv in sv_ids):
+        raise HTTPException(
+            status_code=400, detail="Supervoxel IDs must fit in an unsigned 64-bit int"
+        )
+
+    runs, stats = await run_in_threadpool(
+        sparsevol_backend(dataset.value).supervoxels_to_runs, dataset.value, scale, sv_ids
+    )
+    return sparsevol_response(runs, stats, fmt, request)
 
 
 # Catch all for all other paths for debugging

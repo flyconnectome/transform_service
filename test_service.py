@@ -22,7 +22,7 @@ def test_binary_requests():
     )
     r1 = np.frombuffer(
         client.post(
-            "/query/dataset/test/s/7/values_binary/format/array_float_Nx3", data=q1.tobytes()
+            "transform-service/query/dataset/test/s/7/values_binary/format/array_float_Nx3", data=q1.tobytes()
         ).content,
         dtype=np.float32,
     ).reshape(q1.shape[0], 2)
@@ -30,7 +30,7 @@ def test_binary_requests():
     q2 = q1.swapaxes(0, 1).copy(order="C")
     r2 = np.frombuffer(
         client.post(
-            "/query/dataset/test/s/7/values_binary/format/array_float_3xN", data=q2.tobytes()
+            "transform-service/query/dataset/test/s/7/values_binary/format/array_float_3xN", data=q2.tobytes()
         ).content,
         dtype=np.float32,
     ).reshape(2, q2.shape[1])
@@ -44,7 +44,7 @@ def test_out_of_range():
     )
     r1 = np.frombuffer(
         client.post(
-            "/query/dataset/test/s/7/values_binary/format/array_float_Nx3", data=q1.tobytes()
+            "transform-service/query/dataset/test/s/7/values_binary/format/array_float_Nx3", data=q1.tobytes()
         ).content,
         dtype=np.float32,
     ).reshape(q1.shape[0], 2)
@@ -63,7 +63,7 @@ def test_query_ffn1_binary():
         copy=True,
     )
     response = client.post(
-        "/query/dataset/fafb-ffn1-20200412-gcs/s/0/values_binary/format/array_float_Nx3",
+        "transform-service/query/dataset/fafb-ffn1-20200412-gcs/s/0/values_binary/format/array_float_Nx3",
         data=q1.tobytes(),
     )
     assert response.status_code == 200
@@ -83,7 +83,7 @@ def test_query_ffn1_values_string():
     }
 
     response = client.post(
-        "/query/dataset/fafb-ffn1-20200412-gcs/s/0/values_array_string_response",
+        "transform-service/query/dataset/fafb-ffn1-20200412-gcs/s/0/values_array_string_response",
         json=q1,
     )
     assert response.status_code == 200
