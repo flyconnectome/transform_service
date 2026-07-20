@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from msgpack_asgi import MessagePackMiddleware
 
 from . import config
+from . import l2cache
 from . import sparsevol
 from . import sparsevol_live
 from .rle import decode_rle
@@ -70,8 +71,8 @@ TAGS_METADATA = [
     {
         "name": "sparsevol",
         "description": (
-            "Sparse voxels for a segment, as run-length encoded runs, served "
-            "from a precomputed supervoxel index. No dense image data is read."
+            "Sparse voxels for a segment, as run-length encoded runs, so the "
+            "segmentation itself never crosses the wire."
         ),
     },
     {"name": "other"},
@@ -561,6 +562,25 @@ async def sparsevol_datasets():
     return datasets
 
 
+@app.get("/sparsevol/cache", tags=["sparsevol"], response_model=Dict)
+async def sparsevol_cache():
+    """How full the layer-2 RLE cache is.
+
+    Worth watching, because reaching either ceiling is not a soft landing: the
+    cache stops accepting writes and every sparse volume request starts failing
+    with a 503 until somebody raises the limit or clears it. `n_bytes` is what
+    the cap is measured against; `file_bytes` is what is actually on disk.
+    """
+    cache = l2cache.get_cache()
+    if cache is None:
+        return {"enabled": False}
+    stats = cache.stats()
+    # Everything but where it lives -- this endpoint is reachable from outside
+    # and the server's filesystem layout is nobody else's business.
+    stats.pop("path", None)
+    return {"enabled": True, **stats}
+
+
 @app.get(
     "/sparsevol/dataset/{dataset}/s/{scale}/root/{root_id}",
     response_model=None,
@@ -586,6 +606,10 @@ async def sparsevol_root(
 
     Root IDs are immutable -- an edit mints a new one -- so a result may be
     cached indefinitely against `(root_id, scale)`.
+
+    Server-side, the work is cached per layer-2 node, so an edited neuron only
+    pays for the parts the edit changed and neurons sharing a branch pay for it
+    once. `X-Sparsevol-L2-Cached` and `-L2-Computed` report the split.
     """
     runs, stats = await run_in_threadpool(
         sparsevol_backend(dataset.value).root_to_runs, dataset.value, scale, root_id

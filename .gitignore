@@ -3,6 +3,9 @@ __pycache__
 sparsevol_index
 sparsevol_test_index
 sparsevol_test_volume
+l2_cache.sqlite
+l2_cache.sqlite-wal
+l2_cache.sqlite-shm
 .vscode
 *.log
 .pytest*

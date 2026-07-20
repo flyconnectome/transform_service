@@ -22,11 +22,25 @@ import tensorstore as ts
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app import config, datasource, sparsevol_live
+from app import config, datasource, l2cache, l2cache_warm, sparsevol_live
 from app.chunks import ChunkLayout, chunk_boxes
 from app.rle import COORD_DTYPE, decode_rle
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def isolated_cache(tmp_path, monkeypatch):
+    """Give every test its own empty cache, never the deployment's.
+
+    Autouse because the cached path is the default: a test that forgot this
+    would read a cache another test wrote, and pass or fail on the order they
+    happened to run in.
+    """
+    monkeypatch.setattr(config, "L2_CACHE_PATH", str(tmp_path / "l2.sqlite"))
+    monkeypatch.setattr(l2cache, "_cache", None)
+    yield
+    l2cache.reset_cache()
 
 BASE = "transform-service/sparsevol/dataset/test_segmentation/s/0"
 VOLUME = "sparsevol_test_volume"
@@ -63,6 +77,16 @@ SV_A = supervoxel((0, 0, 0), 11)
 SV_B = supervoxel((1, 0, 0), 22)
 SV_OTHER = supervoxel((0, 0, 0), 33)
 
+# The layer-2 node owning each of them. L2_A and L2_OTHER share a chunk, which
+# is what a neuron passing through one twice looks like.
+L2_A = label(2, (0, 0, 0), 1)
+L2_B = label(2, (1, 0, 0), 1)
+L2_OTHER = label(2, (0, 0, 0), 2)
+L2_MEMBERS = {L2_A: [SV_A], L2_B: [SV_B], L2_OTHER: [SV_OTHER]}
+
+# Root 999 spans two chunks with one node each; root 888 has two nodes in one.
+ROOT_NODES = {999: [L2_A, L2_B], 888: [L2_A, L2_OTHER]}
+
 REGIONS = {
     SV_A: (slice(10, 20), slice(5, 8), slice(2, 4)),
     SV_B: (slice(70, 75), slice(5, 7), slice(2, 3)),
@@ -97,11 +121,16 @@ class FakeGraph:
         return box
 
     def get_leaves(self, root_id, bbox, mip, stop_layer=None):
-        self.leaf_calls.append(stop_layer)
+        self.leaf_calls.append((int(root_id), stop_layer))
         if stop_layer == 2:
             return np.array(
-                [label(2, (0, 0, 0), 1), label(2, (1, 0, 0), 1)], dtype=np.uint64
+                ROOT_NODES.get(int(root_id), [L2_A, L2_B]), dtype=np.uint64
             )
+        # Asked about a layer-2 node, answer for that node alone. The real
+        # graph does the same, and it is what makes per-node caching possible:
+        # a whole-root manifest could never say who owns which voxel.
+        if int(root_id) in L2_MEMBERS:
+            return np.array(L2_MEMBERS[int(root_id)], dtype=np.uint64)
         return np.array([SV_A, SV_B], dtype=np.uint64)
 
 
@@ -199,8 +228,12 @@ def test_root_lookup_uses_the_graph_for_the_manifest(volume):
         decode_rle(runs_from(response)), truth_for(data, [SV_A, SV_B])
     )
 
-    # One call for the chunks to read, one for the supervoxels to keep.
-    assert sorted(c or 0 for c in graph.leaf_calls) == [0, 2]
+    # One call for the layer-2 nodes, then one manifest per node.
+    assert (999, 2) in graph.leaf_calls
+    assert sorted(call for call in graph.leaf_calls if call[1] is None) == [
+        (L2_A, None),
+        (L2_B, None),
+    ]
     assert response.headers["X-Sparsevol-Chunks"] == "2"
     assert response.headers["X-Sparsevol-Supervoxels"] == "2"
 
@@ -425,3 +458,148 @@ def test_datasets_listing_reports_the_mode(volume):
 def test_chunk_layout_matches_the_ids_we_build(volume):
     layout = ChunkLayout(spatial_bits=8, layer_bits=8)
     np.testing.assert_array_equal(layout.decode([SV_A, SV_B]), [[0, 0, 0], [1, 0, 0]])
+
+
+# --- the layer-2 cache ----------------------------------------------------
+
+
+def test_the_second_request_reads_no_voxels(volume):
+    """The whole point of the cache: the dense read happens once."""
+    first = client.get(BASE + "/root/999")
+    assert int(first.headers["X-Sparsevol-Voxels-Read"]) > 0
+    assert first.headers["X-Sparsevol-L2-Computed"] == "2"
+
+    second = client.get(BASE + "/root/999")
+    assert second.headers["X-Sparsevol-L2-Cached"] == "2"
+    assert second.headers["X-Sparsevol-L2-Computed"] == "0"
+    assert second.headers["X-Sparsevol-Voxels-Read"] == "0"
+    assert second.content == first.content
+
+
+def test_the_cached_answer_is_the_same_answer(volume, monkeypatch):
+    """Caching must not change the voxels, only what it cost to get them.
+
+    Worth stating as a test because the two paths genuinely differ: uncached
+    masks every chunk against the whole neuron at once, cached masks each chunk
+    against one L2 node at a time and merges the runs afterwards.
+    """
+    data, _ = volume
+    monkeypatch.setattr(config, "L2CacheEnabled", False)
+    monkeypatch.setattr(l2cache, "_cache", None)
+    uncached = runs_from(client.get(BASE + "/root/999"))
+
+    monkeypatch.setattr(config, "L2CacheEnabled", True)
+    monkeypatch.setattr(l2cache, "_cache", None)
+    cached = runs_from(client.get(BASE + "/root/999"))
+
+    np.testing.assert_array_equal(cached, uncached)
+    np.testing.assert_array_equal(decode_rle(cached), truth_for(data, [SV_A, SV_B]))
+
+
+def test_only_the_missing_nodes_are_recomputed(volume):
+    """What makes an edit cheap: the untouched L2 nodes are already there."""
+    cache = l2cache.get_cache()
+    stats = sparsevol_live.LiveStats()
+    known = sparsevol_live.compute_l2_fragments("test_segmentation", 0, [L2_A], stats)
+    cache.put_many("test_segmentation", 0, known)
+
+    response = client.get(BASE + "/root/999")
+    assert response.headers["X-Sparsevol-L2-Cached"] == "1"
+    assert response.headers["X-Sparsevol-L2-Computed"] == "1"
+    # And only the one chunk holding the uncached node was read.
+    assert response.headers["X-Sparsevol-Chunks"] == "1"
+
+
+def test_two_nodes_in_one_chunk_are_attributed_separately(volume):
+    """The chunk is read once, but its voxels still land in the right node.
+
+    This is the case the per-node masking exists for. A single mask over the
+    whole neuron would be cheaper here and completely useless: there would be
+    no way to say afterwards which of the two nodes a voxel belonged to, and so
+    nothing that could be cached against either of them.
+    """
+    data, _ = volume
+    response = client.get(BASE + "/root/888")
+
+    assert response.status_code == 200
+    assert response.headers["X-Sparsevol-Chunks"] == "1"
+    assert response.headers["X-Sparsevol-L2-Computed"] == "2"
+    np.testing.assert_array_equal(
+        decode_rle(runs_from(response)), truth_for(data, [SV_A, SV_OTHER])
+    )
+
+    cached = l2cache.get_cache().get_many("test_segmentation", 0, [L2_A, L2_OTHER])
+    np.testing.assert_array_equal(decode_rle(cached[L2_A]), truth_for(data, [SV_A]))
+    np.testing.assert_array_equal(
+        decode_rle(cached[L2_OTHER]), truth_for(data, [SV_OTHER])
+    )
+
+
+def test_a_shared_node_is_reused_across_neurons(volume):
+    """Two roots sharing an L2 node: the second gets it for free.
+
+    The reason a cache keyed below the root is worth having at all -- a root
+    key would treat these as entirely unrelated requests.
+    """
+    client.get(BASE + "/root/999")  # caches L2_A and L2_B
+    response = client.get(BASE + "/root/888")  # shares L2_A
+
+    assert response.headers["X-Sparsevol-L2-Cached"] == "1"
+    assert response.headers["X-Sparsevol-L2-Computed"] == "1"
+
+
+def test_a_full_cache_fails_every_request(volume):
+    """Including requests it could have answered, and ones it never touches."""
+    cache = l2cache.get_cache()
+    cache.put_many("test_segmentation", 0, {L2_A: np.zeros((0, 4), dtype=np.int64)})
+    cache.max_keys = 1
+
+    root = client.get(BASE + "/root/999")
+    assert root.status_code == 503
+    assert "full" in root.json()["detail"]
+
+    # The supervoxel endpoint does not use the cache at all, but a wedged cache
+    # should take the service down visibly rather than by halves.
+    assert post([SV_A]).status_code == 503
+
+
+def test_the_cache_endpoint_reports_usage(volume):
+    client.get(BASE + "/root/999")
+    reported = client.get("transform-service/sparsevol/cache").json()
+
+    assert reported["enabled"] is True
+    assert reported["n_keys"] == 2
+    assert reported["full"] is False
+    assert reported["max_bytes"] == config.L2CacheMaxBytes
+
+
+def test_the_cache_endpoint_says_when_caching_is_off(volume, monkeypatch):
+    monkeypatch.setattr(config, "L2CacheEnabled", False)
+    monkeypatch.setattr(l2cache, "_cache", None)
+    assert client.get("transform-service/sparsevol/cache").json() == {"enabled": False}
+
+
+def test_warming_up_leaves_nothing_to_compute(volume):
+    """The warm-up and the request path have to agree on the key, or it is moot."""
+    assert l2cache_warm.main(["test_segmentation", "999", "--scale", "0"]) == 0
+
+    response = client.get(BASE + "/root/999")
+    assert response.status_code == 200
+    assert response.headers["X-Sparsevol-L2-Cached"] == "2"
+    assert response.headers["X-Sparsevol-Voxels-Read"] == "0"
+
+
+def test_a_dry_run_reads_nothing(volume):
+    assert (
+        l2cache_warm.main(["test_segmentation", "999", "--scale", "0", "--dry-run"]) == 0
+    )
+    assert l2cache.get_cache().counters() == (0, 0)
+
+
+def test_warming_stops_when_the_cache_is_full(volume, monkeypatch):
+    monkeypatch.setattr(config, "L2CacheMaxKeys", 1)
+    # One chunk per pass, so the first pass fills it and the second is refused.
+    code = l2cache_warm.main(
+        ["test_segmentation", "999", "--scale", "0", "--chunks", "1"]
+    )
+    assert code == 2

@@ -92,9 +92,10 @@ Each dataset therefore needs two things in `DATASOURCES`: `sparsevol` in its
 
 ### Cost, and the limits on it
 
-The dense read happens per request — there is no index and no cache, by design.
-That is affordable only because the segmentation is on the same machine: it
-trades the client's bandwidth for the server's local I/O.
+The dense read happens per request the first time anyone asks — there is no
+precomputed index. That is affordable only because the segmentation is on the
+same machine: it trades the client's bandwidth for the server's local I/O.
+Repeat requests are served from the [layer-2 cache](#the-layer-2-cache) below.
 
 It is not free, though. Graph chunks are large — aedes is 512×512×128 at mip 0,
 so **one chunk is 33.5M voxels and ~268 MB once decompressed to uint64**, and
@@ -104,7 +105,7 @@ keep a single request from running away, both overridable per dataset:
 | setting | default | meaning |
 |---|---|---|
 | `SparseVolMaxChunks` | 256 | chunks one request may read |
-| `SparseVolMaxVoxels` | 2e9 | voxels one request may read (~16 GB, ~60 aedes chunks) |
+| `SparseVolMaxVoxels` | 4e9 | voxels one request may read (~32 GB, ~120 aedes chunks) |
 | `SparseVolMaxWorkers` | 4 | concurrent chunk reads *within* a request; each holds a whole chunk, so ~1 GB peak |
 | `SparseVolMaxConcurrent` | 2 | reads in flight at once, process-wide (~1.1 GB each) |
 | `SparseVolQueueSeconds` | 20 | how long a request waits for a slot before being shed |
@@ -130,6 +131,75 @@ both need to exceed it, or a slow success arrives as a 502 with a killed worker.
 
 Requesting a coarser scale is the cheap way to reduce work, where a dataset has
 one downloaded locally.
+
+### The layer-2 cache
+
+Most of that dense read is repeated work: ask about the same neuron twice, or
+about two neurons sharing a branch, and the same chunks get read and masked
+again. So the runs are cached per **layer-2 node** — see
+[`app/l2cache.py`](app/l2cache.py). A fully cached neuron reads no image data
+and makes exactly one chunkedgraph call.
+
+Layer 2 is the useful key because proofreading mostly leaves it alone. A merge
+spanning two chunks adds an edge *above* layer 2 and mints no new L2 node at
+all; only within-chunk merges and splits recompute one, and only for the chunks
+the cut touches. So an edited neuron pays for the part that changed and reuses
+the rest, and entries that do go stale are simply never asked for again.
+
+`X-Sparsevol-L2-Cached` and `-L2-Computed` report the split per request, and
+`GET /sparsevol/cache` reports how full the store is.
+
+```bash
+curl .../sparsevol/cache
+```
+
+| setting | default | meaning |
+|---|---|---|
+| `L2CacheEnabled` | `True` | off falls back to computing every request live |
+| `L2_CACHE_PATH` | `./l2_cache.sqlite` | env-overridable; put it on a roomy disk |
+| `L2CacheMaxBytes` | 50 GB | ~25,000 aedes neurons at mip 1 |
+| `L2CacheMaxKeys` | 20M | the other ceiling |
+| `L2CacheManifestWorkers` | 8 | concurrent chunkedgraph calls on a cold read |
+
+**It fails loudly when full.** On reaching either ceiling the cache stops
+accepting writes and *every* sparse volume request starts returning 503 —
+including ones it could have served, and the supervoxel endpoint that never
+touches it. This is deliberate. An LRU would quietly thrash at the ceiling and
+look, from outside, exactly like a cache that is working; the thing worth
+noticing is the ceiling being reached at all, and that is a capacity decision
+for a person. The 503 names the three ways out: raise the limits, clear the
+cache, or set `L2CacheEnabled = False`.
+
+Sizing, measured on aedes at mip 1: ~1,650 runs per L2 node, ~3.8 kB packed,
+~500 L2 nodes for a large neuron — so roughly 2 MB per neuron.
+
+One cost worth knowing about: attributing a voxel to an L2 node needs that
+node's supervoxel manifest, and there is no batch endpoint, so a cold neuron
+costs one chunkedgraph GET per L2 node. It is paid once per node ever. With
+caching disabled the service uses the old path instead — a single manifest call
+for the whole root — which is why both paths still exist.
+
+### Warming the cache
+
+Populating happens on demand, so this is optional; it only moves the cost of
+the first request to a time of your choosing.
+
+```bash
+uv run python -m app.l2cache_warm --stats
+uv run python -m app.l2cache_warm wclee_aedes_brain --scale 1 --roots roots.txt
+uv run python -m app.l2cache_warm --clear --dataset wclee_aedes_brain
+```
+
+It is not a loop over the endpoint. Neurons share chunks, so it gathers the L2
+nodes of every root first, groups them by chunk — which needs no extra graph
+traffic, since a node's chunk falls out of arithmetic on its ID — and reads
+each chunk once for all the nodes in it. On aedes that is the difference
+between ~120 hours and ~18 for ten thousand neurons. `--chunks` bounds how much
+is held per pass; `--dry-run` reports the work without reading a voxel.
+
+Run it against a quiet server: it holds the same chunks in memory as a request
+does, and its concurrency limit is its own — the service's cap lives in the
+service's process and knows nothing about this one.
 
 ### Precomputed indexes (optional, unused today)
 

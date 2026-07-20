@@ -28,7 +28,7 @@ MaxSupervoxels = 500_000
 # ~16 GB of reads, or roughly 60 aedes chunks. Raise it per dataset if real
 # neurons turn out to span more, but raise it knowing what it costs.
 SparseVolMaxChunks = 256
-SparseVolMaxVoxels = 2_000_000_000
+SparseVolMaxVoxels = 4_000_000_000
 
 # Chunks are read concurrently and each worker holds a whole decompressed chunk,
 # so this multiplies straight into peak memory -- 4 aedes chunks is ~1 GB. Kept
@@ -54,6 +54,44 @@ SparseVolMaxConcurrent = 2
 # a burst, short enough that a queue cannot outlive the client or the proxy's
 # read timeout.
 SparseVolQueueSeconds = 20
+
+# --- layer-2 RLE cache -----------------------------------------------------
+#
+# Caches the runs of individual layer-2 nodes, so a request only pays the dense
+# read for the parts of a neuron nobody has asked about yet. L2 nodes are the
+# right key because proofreading mostly leaves them alone: a merge between two
+# chunks adds an edge above layer 2 and mints no new L2 node at all, so an edit
+# typically invalidates nothing and at worst a couple of entries.
+#
+# Measured on aedes at mip 1: ~1,650 runs per L2 node, ~3.8 kB once packed, and
+# ~500 L2 nodes for a large neuron -- so roughly 2 MB per neuron, or ~25,000
+# neurons in the 50 GB below.
+L2CacheEnabled = True
+
+# One SQLite file, all datasets. Put this somewhere with room: the point of the
+# cap is to keep it bounded, not small. Set L2_CACHE_PATH in the environment on
+# a deployment where the checkout is not on the roomy disk.
+L2_CACHE_PATH = os.environ.get(
+    "L2_CACHE_PATH",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "l2_cache.sqlite")),
+)
+
+# When either ceiling is reached the cache stops accepting writes and *every*
+# sparse volume request starts failing with a 503. That is deliberate: a cache
+# quietly wedged at its ceiling looks exactly like a cache that is working, and
+# the failure mode we care about -- unbounded growth on a shared disk -- is one
+# nobody notices until the disk is full. Failing loudly makes it a decision.
+#
+# To recover: raise these, prune with `python -m app.l2cache_warm --clear`, or
+# set L2CacheEnabled = False to fall back to computing every request live.
+L2CacheMaxBytes = 50 * 1024**3
+L2CacheMaxKeys = 20_000_000
+
+# Manifest lookups (which supervoxels belong to an L2 node) are one HTTP GET to
+# the chunkedgraph each, and a cold neuron needs one per L2 node. They are
+# fetched concurrently, but this is load on a shared production CAVE server --
+# keep it neighbourly.
+L2CacheManifestWorkers = 8
 
 # Where the supervoxel -> RLE fragment stores live. Anything CloudFiles can
 # read: a local path, gs://, s3:// or https://.

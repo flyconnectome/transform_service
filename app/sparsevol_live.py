@@ -6,9 +6,14 @@ reading a few hundred chunks costs a local disk read; sending those same chunks
 to the client would cost gigabytes over the wire. Doing the masking server-side
 turns a multi-gigabyte download into a few hundred kilobytes of runs.
 
-So this trades the client's bandwidth for the server's I/O, deliberately. There
-is no index and no cache: every request re-reads and re-sparsifies. What makes
-that affordable is locality, not cleverness.
+So this trades the client's bandwidth for the server's I/O, deliberately. What
+makes that affordable is locality, not cleverness.
+
+The dense read is then cached per layer-2 node (see :mod:`app.l2cache`), so a
+neuron asked about twice, or two neurons sharing a branch, pay for it once.
+Caching is optional and off-by-configuration: with it disabled every request
+re-reads and re-sparsifies, which is what this service did originally and still
+does for the supervoxel endpoint.
 
 **How it knows where to read.** The segmentation is flat -- the stored labels
 are watershed supervoxels -- but a PyChunkedGraph sits on top of it, and its
@@ -32,8 +37,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 from . import config
 from . import datasource
-from .chunks import ChunkLayout, chunk_boxes, l2_chunk_positions
-from .rle import COORD_DTYPE, encode_rle, rle_voxel_count
+from . import l2cache
+from .chunks import ChunkLayout, chunk_bbox, chunk_boxes, l2_chunk_positions
+from .rle import COORD_DTYPE, encode_rle, rle_voxel_count, union_rle
 
 _graphs = {}
 _layouts = {}
@@ -76,6 +82,11 @@ class LiveStats:
 
     def __init__(self):
         self.n_l2_nodes = 0
+        # How the L2 nodes were answered. Together these add up to n_l2_nodes
+        # on the cached path, and are the quickest read on whether the cache is
+        # earning its disk: cached high and computed low is the whole point.
+        self.n_l2_cached = 0
+        self.n_l2_computed = 0
         self.n_supervoxels = 0
         self.n_chunks = 0
         self.n_chunks_empty = 0
@@ -270,22 +281,181 @@ def _to_runs(coords, stats, started):
     return runs, stats
 
 
+def l2_manifests(graph, l2_ids, workers):
+    """``{l2_id: supervoxels}``, one chunkedgraph call each, fetched concurrently.
+
+    There is no batch endpoint -- ``get_leaves`` takes a single node -- so a
+    cold neuron costs one HTTP GET per L2 node. That is the price of being able
+    to attribute a voxel to an L2 node at all: a supervoxel ID reveals its
+    chunk by arithmetic, but never its owner, and a chunk routinely holds
+    several of a neuron's L2 nodes.
+
+    It is paid once per node ever, since the runs it produces are then cached.
+    """
+    bounds = graph.meta.bounds(0)
+
+    def fetch(l2_id):
+        leaves = graph.get_leaves(int(l2_id), bounds, 0)
+        return int(l2_id), np.asarray(leaves, dtype=np.uint64).ravel()
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return dict(pool.map(fetch, [int(i) for i in l2_ids]))
+
+
+def read_and_split(dataset, scale, groups, stats):
+    """Read each chunk once and attribute its voxels to the L2 node that owns them.
+
+    ``groups`` is ``[(box, [(l2_id, supervoxels), ...]), ...]``. Grouping by
+    chunk is what keeps this honest: a neuron passing through a chunk as three
+    branches has three L2 nodes there, and reading the chunk once for all of
+    them is the difference between this and the naive per-node loop.
+    """
+    store = datasource.get_datastore(dataset, scale)
+    domain = store.domain
+
+    def read(group):
+        box, members = group
+        lo = np.maximum(np.asarray(box.minpt, dtype=np.int64), domain.inclusive_min[:3])
+        hi = np.minimum(np.asarray(box.maxpt, dtype=np.int64), domain.exclusive_max[:3])
+        empty = [(l2_id, np.zeros((0, 3), dtype=COORD_DTYPE)) for l2_id, _ in members]
+        if np.any(hi <= lo):
+            return 0, empty
+
+        block = store[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]].read().result()
+        block = np.asarray(block)
+        if block.ndim == 4:
+            block = block[..., 0]
+
+        # One masking pass per L2 node, rather than a single pass building an
+        # owner map for all of them. A chunk holds only a handful of a neuron's
+        # nodes, so the extra passes are cheap, while an owner map would need
+        # full-width temporaries several times the size of the block -- and the
+        # block is already the thing this service budgets its memory around.
+        out = []
+        for l2_id, supervoxels in members:
+            keep = _mask_to_labels(block, supervoxels)
+            out.append((l2_id, (np.argwhere(keep) + lo).astype(COORD_DTYPE)))
+        return int(block.size), out
+
+    coords = {}
+    workers = info_workers(dataset)
+    with read_slot(stats), ThreadPoolExecutor(max_workers=workers) as pool:
+        for read_voxels, members in pool.map(read, groups):
+            stats.voxels_read += read_voxels
+            if not any(c.shape[0] for _, c in members):
+                stats.n_chunks_empty += 1
+            coords.update(members)
+    return coords
+
+
+def compute_l2_fragments(dataset, scale, l2_ids, stats, enforce_budget=True):
+    """Runs for each of ``l2_ids``, read and sparsified from the local volume.
+
+    Returns ``{l2_id: (M, 4) runs}`` covering every id asked for, including the
+    ones that turn out to be empty -- see :meth:`L2Cache.put_many` for why
+    those are worth recording.
+
+    ``enforce_budget`` is off for the offline warm-up, which deliberately reads
+    far more chunks per call than any single request is allowed to.
+    """
+    info = get_live_info(dataset)
+    graph = get_graph(dataset)
+    layout = get_layout(dataset)
+
+    workers = max(1, int(info.get("manifest_workers", config.L2CacheManifestWorkers)))
+    try:
+        manifests = l2_manifests(graph, l2_ids, workers)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Could not resolve layer-2 supervoxel manifests: {}".format(exc),
+        )
+    stats.n_supervoxels += sum(len(s) for s in manifests.values())
+
+    groups = {}
+    for l2_id, supervoxels in manifests.items():
+        position = tuple(int(v) for v in layout.decode([l2_id])[0])
+        groups.setdefault(position, []).append((l2_id, supervoxels))
+
+    boxes = []
+    fragments = {}
+    for position, members in sorted(groups.items()):
+        box = chunk_bbox(graph.meta, position, mip=scale)
+        if box.subvoxel():
+            # Clipped away entirely against the volume bounds. That is a real
+            # answer, not a failure, so it is recorded as empty rather than
+            # left to be recomputed on every future request.
+            for l2_id, _ in members:
+                fragments[l2_id] = np.zeros((0, 4), dtype=np.int64)
+            continue
+        boxes.append((box, members))
+
+    stats.n_chunks += len(boxes)
+    if enforce_budget:
+        check_budget(info, [box for box, _ in boxes], stats)
+
+    coords = read_and_split(dataset, scale, boxes, stats) if boxes else {}
+    for l2_id, points in coords.items():
+        fragments[l2_id] = encode_rle(points)
+    return fragments
+
+
 def root_to_runs(dataset, scale, root_id):
     """Sparse voxels for a root ID, computed from the local segmentation.
 
-    Two graph calls and no image data: ``stop_layer=2`` gives the chunks to
-    read, and the full leaf set gives the supervoxels to keep. Everything after
-    that is local.
+    ``stop_layer=2`` gives the neuron's layer-2 nodes without reading a voxel.
+    From there the answer is either assembled from cached per-node runs, or
+    computed by reading the chunks those nodes occupy -- see the two functions
+    below for why those are separate paths rather than one.
     """
     info = get_live_info(dataset)
     started = time.time()
     stats = LiveStats()
+
+    cache = l2cache.get_cache()
+    if cache is not None:
+        # Before any work, and even for a request that would have been served
+        # entirely from cache: a wedged cache should be impossible to miss.
+        cache.check_health()
 
     graph = get_graph(dataset)
     layout = get_layout(dataset)
 
     try:
         l2_ids = graph.get_leaves(int(root_id), graph.meta.bounds(0), 0, stop_layer=2)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail="Could not resolve root {}: {}".format(root_id, exc)
+        )
+
+    l2_ids = np.unique(np.asarray(l2_ids, dtype=np.uint64).ravel())
+    if l2_ids.size == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Root {} has no layer-2 nodes. Is it a current root ID?".format(
+                root_id
+            ),
+        )
+    stats.n_l2_nodes = len(l2_ids)
+
+    if cache is None:
+        return _root_runs_uncached(
+            dataset, scale, root_id, l2_ids, info, graph, layout, stats, started
+        )
+    return _root_runs_cached(dataset, scale, l2_ids, cache, stats, started)
+
+
+def _root_runs_uncached(
+    dataset, scale, root_id, l2_ids, info, graph, layout, stats, started
+):
+    """Mask every chunk against the whole root at once, attributing nothing.
+
+    Kept for when caching is off, because it is strictly cheaper there: one
+    chunkedgraph call for the entire manifest, against one per L2 node. Nothing
+    it produces could be cached anyway -- a single mask over the whole neuron
+    cannot say which L2 node a given voxel belonged to.
+    """
+    try:
         supervoxels = graph.get_leaves(int(root_id), graph.meta.bounds(0), 0)
     except Exception as exc:
         raise HTTPException(
@@ -297,8 +467,6 @@ def root_to_runs(dataset, scale, root_id):
             status_code=404,
             detail="Root {} has no supervoxels. Is it a current root ID?".format(root_id),
         )
-
-    stats.n_l2_nodes = len(l2_ids)
     stats.n_supervoxels = len(supervoxels)
 
     positions = l2_chunk_positions(layout, l2_ids)
@@ -310,6 +478,33 @@ def root_to_runs(dataset, scale, root_id):
     return _to_runs(coords, stats, started)
 
 
+def _root_runs_cached(dataset, scale, l2_ids, cache, stats, started):
+    """Serve what is cached, compute the rest, and remember it.
+
+    A fully cached neuron reads no image data and makes no manifest call at
+    all: the only chunkedgraph traffic is the ``stop_layer=2`` lookup that got
+    us here.
+    """
+    fragments = cache.get_many(dataset, scale, l2_ids)
+    stats.n_l2_cached = len(fragments)
+
+    missing = [int(i) for i in l2_ids.tolist() if int(i) not in fragments]
+    stats.n_l2_computed = len(missing)
+
+    if missing:
+        computed = compute_l2_fragments(dataset, scale, missing, stats)
+        cache.put_many(dataset, scale, computed)
+        fragments.update(computed)
+
+    # Merged rather than concatenated: L2 nodes meet along chunk boundaries, so
+    # two of them routinely hold halves of what is really one unbroken run.
+    runs = union_rle(list(fragments.values()))
+    stats.n_runs = len(runs)
+    stats.n_voxels = rle_voxel_count(runs)
+    stats.seconds = time.time() - started
+    return runs, stats
+
+
 def supervoxels_to_runs(dataset, scale, sv_ids):
     """Sparse voxels for explicit supervoxel IDs, with no call to the graph.
 
@@ -319,6 +514,13 @@ def supervoxels_to_runs(dataset, scale, sv_ids):
     info = get_live_info(dataset)
     started = time.time()
     stats = LiveStats()
+
+    # This path never touches the cache -- an arbitrary set of supervoxels does
+    # not line up with L2 nodes -- but it fails alongside it anyway, so a full
+    # cache takes the whole service down visibly rather than half of it.
+    cache = l2cache.get_cache()
+    if cache is not None:
+        cache.check_health()
 
     sv_ids = np.unique(np.asarray(sv_ids, dtype=np.uint64))
     sv_ids = sv_ids[sv_ids != 0]
