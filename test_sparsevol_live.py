@@ -10,6 +10,7 @@ import io
 import shutil
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
 import numpy as np
@@ -1016,6 +1017,88 @@ def test_the_answer_size_is_capped_independently_of_the_box(volume, monkeypatch)
     monkeypatch.setattr(config, "SparseVolBoxMaxCoarseVoxels", 10**9)
     runs, _ = box_runs([[0, 0, 0], [128, 128, 64]], objects=[[SV_A]])
     assert len(runs)
+
+
+def test_chunkedgraph_calls_are_bounded_across_requests(monkeypatch):
+    """The ceiling is on the process, not on one request.
+
+    SparseVolBoxLookupWorkers limits one request's concurrency; this limits how
+    many requests can be doing that at once. Without it the only bound on what
+    the service points at a shared chunkedgraph is how many requests arrive.
+    """
+    monkeypatch.setattr(
+        sparsevol_live, "_graph_slots", threading.BoundedSemaphore(3)
+    )
+    live = []
+    peak = []
+    lock = threading.Lock()
+
+    def slow_call():
+        with lock:
+            live.append(1)
+            peak.append(len(live))
+        time.sleep(0.02)
+        with lock:
+            live.pop()
+        return "ok"
+
+    with ThreadPoolExecutor(16) as pool:
+        results = list(pool.map(lambda _: sparsevol_live.call_graph(slow_call), range(32)))
+
+    assert results == ["ok"] * 32
+    assert max(peak) <= 3, "saw {} concurrent calls past a ceiling of 3".format(max(peak))
+
+
+def test_a_transient_chunkedgraph_failure_is_retried(monkeypatch):
+    """One blip should not throw away every other lookup in the request."""
+    monkeypatch.setattr(config, "SparseVolChunkedGraphRetries", 2)
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError("connection reset")
+        return "ok"
+
+    assert sparsevol_live.call_graph(flaky) == "ok"
+    assert len(calls) == 3
+
+
+def test_a_client_error_from_the_chunkedgraph_is_not_retried(monkeypatch):
+    """A bad root stays bad; retrying it only wastes round trips."""
+    monkeypatch.setattr(config, "SparseVolChunkedGraphRetries", 3)
+    calls = []
+
+    class Response:
+        status_code = 400
+
+    class BadRequest(Exception):
+        response = Response()
+
+    def rejected():
+        calls.append(1)
+        raise BadRequest("no such root")
+
+    with pytest.raises(BadRequest):
+        sparsevol_live.call_graph(rejected)
+    assert len(calls) == 1
+
+
+def test_a_lookup_that_never_recovers_still_fails(monkeypatch):
+    """Retries are bounded, and the slot is given back each time."""
+    monkeypatch.setattr(config, "SparseVolChunkedGraphRetries", 2)
+    calls = []
+
+    def broken():
+        calls.append(1)
+        raise RuntimeError("down")
+
+    with pytest.raises(RuntimeError):
+        sparsevol_live.call_graph(broken)
+    assert len(calls) == 3
+
+    # The semaphore is back to full, so a later request is not starved.
+    assert sparsevol_live.call_graph(lambda: "ok") == "ok"
 
 
 def test_the_supervoxel_budget_is_enforced(volume, monkeypatch):

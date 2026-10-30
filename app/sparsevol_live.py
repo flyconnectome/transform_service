@@ -66,6 +66,52 @@ _graph_lock = threading.Lock()
 # reading at once, not how fast each one goes.
 _read_slots = threading.BoundedSemaphore(config.SparseVolMaxConcurrent)
 
+# Chunkedgraph calls are bounded separately, and across requests rather than
+# within one. They are not what the read slots protect against -- a lookup
+# holds a socket, not a gigabyte of chunks -- and they happen before a read
+# slot is taken, so without this the only limit on how many this process points
+# at a shared server is how many requests happen to arrive.
+_graph_slots = threading.BoundedSemaphore(config.SparseVolChunkedGraphMaxConcurrent)
+
+
+@contextmanager
+def graph_slot():
+    """Hold one of the chunkedgraph slots for the duration of one call.
+
+    Blocks rather than shedding, unlike :func:`read_slot`: a queued lookup
+    costs a thread where a queued read costs a gigabyte, and the calls drain at
+    ~90/s, so waiting is cheaper than failing.
+    """
+    _graph_slots.acquire()
+    try:
+        yield
+    finally:
+        _graph_slots.release()
+
+
+def _is_client_error(exc):
+    """A 4xx is the caller's mistake, and retrying it only wastes a round trip."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status is not None and 400 <= status < 500
+
+
+def call_graph(fn, *args, **kwargs):
+    """Make one chunkedgraph call, admitted and retried.
+
+    Every call to the graph in this module goes through here, so the ceiling
+    and the retry are properties of the service rather than of whichever call
+    site remembered them.
+    """
+    attempts = max(0, int(config.SparseVolChunkedGraphRetries)) + 1
+    for attempt in range(attempts):
+        try:
+            with graph_slot():
+                return fn(*args, **kwargs)
+        except Exception as exc:
+            if attempt == attempts - 1 or _is_client_error(exc):
+                raise
+            time.sleep(0.25 * 2**attempt)
+
 
 @contextmanager
 def read_slot(stats):
@@ -379,7 +425,7 @@ def l2_manifests(graph, l2_ids, workers):
     bounds = graph.meta.bounds(0)
 
     def fetch(l2_id):
-        leaves = graph.get_leaves(int(l2_id), bounds, 0)
+        leaves = call_graph(graph.get_leaves, int(l2_id), bounds, 0)
         return int(l2_id), np.asarray(leaves, dtype=np.uint64).ravel()
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -851,7 +897,8 @@ def leaves_in_box(graph, roots, bounds, workers):
     """
 
     def fetch(root):
-        return np.asarray(graph.get_leaves(int(root), bounds, 0), dtype=np.uint64).ravel()
+        leaves = call_graph(graph.get_leaves, int(root), bounds, 0)
+        return np.asarray(leaves, dtype=np.uint64).ravel()
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         try:

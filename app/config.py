@@ -144,10 +144,32 @@ SparseVolBoxMaxDown = 16
 # than releasing it when the last block lands.
 SparseVolBoxBlockVoxels = 32_000_000
 
-# Concurrent get_leaves(root, bounds=box) lookups. One per object, against the
-# shared production CAVE server, so keep it neighbourly -- same reasoning as
-# L2CacheManifestWorkers.
-SparseVolBoxLookupWorkers = 8
+# Concurrent get_leaves(root, bounds=box) lookups within one request, one per
+# object. Measured against cave.fanc-fly.com: throughput scales ~1.95x per
+# doubling from 4 to 32, and median per-call latency stays flat at ~0.35s, so
+# the call is latency-bound and concurrency is nearly free. The chunkedgraph
+# has no batch endpoint, so this is the only lever there is.
+#
+# Only the `roots` form of a box request uses this at all. A caller that passes
+# `objects` has already done its own lookups and the service makes no graph
+# call -- which is how SEAM uses it, so raising this does nothing for that path.
+SparseVolBoxLookupWorkers = 16
+
+# ...but that is per request, and the lookup happens before a read slot is
+# taken, so nothing used to bound how many requests did it at once. A handful
+# of cluster jobs could point several hundred concurrent calls at a server
+# shared with everyone else using the dataset.
+#
+# This is the ceiling that actually protects it: the most chunkedgraph calls
+# this process will have in flight, across every request and both the box and
+# the layer-2 paths. Per *process* -- multiply by the gunicorn worker count
+# (3 on flyem1) for what CAVE sees from this service.
+SparseVolChunkedGraphMaxConcurrent = 32
+
+# Transient failures are retried this many times with a short backoff. A single
+# blip would otherwise fail a whole request after it had already paid for every
+# other lookup in it. 4xx answers are not retried -- a bad root will stay bad.
+SparseVolChunkedGraphRetries = 2
 
 # --- layer-2 RLE cache -----------------------------------------------------
 #
