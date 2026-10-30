@@ -124,6 +124,15 @@ answer, not an error. Boxes are bounded by `SparseVolBoxMaxVoxels` (how much
 gets read) and `SparseVolBoxMaxCoarseVoxels` (how much comes back) — a sparse
 and a dense box of the same size cost the same to read and differ by orders of
 magnitude in what they return, so the two limits are separate.
+`SparseVolBoxMaxSupervoxels` bounds a third thing again: how large a *request*
+may be, since an `objects` request spells out every supervoxel.
+
+> **Deployment note.** An `objects` request at that ceiling is ~10 MB of JSON,
+> well over nginx's 1 MB default body size. The reverse proxy needs
+> `client_max_body_size` raised for this path — see
+> [Run in production](#run-in-production) — otherwise an oversized request is
+> rejected by the proxy with an opaque 413 instead of reaching the service,
+> which would answer with a 400 naming the limit.
 
 ### How it knows which chunks to read
 
@@ -303,6 +312,27 @@ Please see [this tutorial](https://dylancastillo.co/posts/fastapi-nginx-gunicorn
 
 [This Slack message](https://flyconnectome.slack.com/archives/C29G9694H/p1740648367149559) contains details on how
 the service is currently deployed on `flyem1`.
+
+The sparse voxel service's `/box` endpoint accepts requests that list every
+supervoxel of every object, which can run to ~10 MB at
+`SparseVolBoxMaxSupervoxels`. nginx defaults to a 1 MB body, so the service's
+`location` block needs:
+
+```nginx
+location /transform-service/ {
+      client_max_body_size 16m;   # /box requests list supervoxels explicitly
+      client_body_buffer_size 1m; # optional: keeps typical bodies out of /tmp
+      ...
+}
+```
+
+Keep this above whatever `SparseVolBoxMaxSupervoxels` implies, so an oversized
+request is refused by the service with a message naming the limit rather than
+by the proxy with a bare 413. Apply with:
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
 
 To restart the service (e.g. after changing the code), you can run:
 

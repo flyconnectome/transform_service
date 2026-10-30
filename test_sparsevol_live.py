@@ -1018,6 +1018,24 @@ def test_the_answer_size_is_capped_independently_of_the_box(volume, monkeypatch)
     assert len(runs)
 
 
+def test_the_supervoxel_budget_is_enforced(volume, monkeypatch):
+    """The one ceiling that bounds the request rather than the work.
+
+    An `objects` request spells out every supervoxel, so without this nothing
+    caps how large a body the service will accept -- and the proxy's own limit
+    would reject it as an opaque 413 rather than a 400 naming the problem.
+    """
+    monkeypatch.setattr(config, "SparseVolBoxMaxSupervoxels", 1)
+    with pytest.raises(HTTPException) as caught:
+        box_runs([[0, 0, 0], [128, 128, 64]], objects=[[SV_A, SV_B]])
+    assert caught.value.status_code == 400
+    assert "supervoxels" in caught.value.detail
+
+    # Refused before anything is read: the lookup is all it cost.
+    _, stats = box_runs([[0, 0, 0], [128, 128, 64]], objects=[[SV_A]])
+    assert stats.voxels_read > 0
+
+
 def test_the_object_budget_is_enforced(volume, monkeypatch):
     monkeypatch.setattr(config, "SparseVolBoxMaxObjects", 1)
     with pytest.raises(HTTPException) as caught:

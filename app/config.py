@@ -109,6 +109,19 @@ SparseVolBoxMaxCoarseVoxels = 100_000_000
 # per open end; the headroom is for a caller that pools more.
 SparseVolBoxMaxObjects = 256
 
+# Supervoxels a box request may cover, across all of its objects. Nothing else
+# bounds this -- SparseVolBoxMaxObjects caps how many objects there are, but a
+# single object can carry any number of leaves, and a big root in a large box
+# runs to thousands.
+#
+# It matters mostly for the request rather than the work: an `objects` request
+# spells every supervoxel out as a decimal string, which measured ~21 bytes
+# each, so this ceiling is ~10 MB of JSON. Whatever is set here, nginx's
+# `client_max_body_size` for the service has to be comfortably above it, or an
+# oversized request dies as an opaque 413 from the proxy instead of a 400 that
+# names the limit. 500k supervoxels <-> 16m is the pairing deployed.
+SparseVolBoxMaxSupervoxels = 500_000
+
 # OR-downsampling factor per axis. A coarse voxel belongs to every object with
 # at least one fine voxel in it, so this shrinks the answer without erasing the
 # thin neurites that mode-downsampling would lose.

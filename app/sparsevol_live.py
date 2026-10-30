@@ -1144,6 +1144,24 @@ def box_to_runs(dataset, scale, bbox, roots=None, objects=None, down=None):
 
     ids, labels = label_lookup(groups)
     stats.n_supervoxels = len(ids)
+
+    # Checked after the lookup, since a `roots` request does not know its own
+    # supervoxel count until the graph has answered -- but still before any
+    # voxel is read, so an over-large request costs nothing but the lookup.
+    max_supervoxels = info.get(
+        "box_max_supervoxels", config.SparseVolBoxMaxSupervoxels
+    )
+    if max_supervoxels and len(ids) > max_supervoxels:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Request covers {:,} supervoxels, over the {:,} limit for this "
+                "dataset. Split the objects across several requests, or ask by "
+                "root and let the service resolve them.".format(
+                    len(ids), max_supervoxels
+                )
+            ),
+        )
     stats.n_objects_empty = sum(1 for group in groups if len(group) == 0)
 
     if np.any(read_hi <= read_lo) or len(ids) == 0:
