@@ -6,6 +6,7 @@ are all exercised for real. Only the chunkedgraph is substituted -- it is the
 one piece that is genuinely remote.
 """
 
+import io
 import shutil
 import threading
 import time
@@ -22,9 +23,19 @@ import tensorstore as ts
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app import config, datasource, l2cache, l2cache_warm, sparsevol_live
+from fastapi import HTTPException
+
+from app import (
+    config,
+    datasource,
+    l2cache,
+    l2cache_warm,
+    sparsevol,
+    sparsevol_live,
+)
 from app.chunks import ChunkLayout, chunk_boxes
-from app.rle import COORD_DTYPE, decode_rle
+from app.rle import COORD_DTYPE, decode_rle, decode_rle_labelled, encode_rle_labelled
+from conftest import runs_from, sort_rows
 
 client = TestClient(app)
 
@@ -66,11 +77,6 @@ def supervoxel(chunk, segid):
     return label(1, chunk, segid)
 
 
-def sort_zyx(coords):
-    coords = np.unique(np.asarray(coords), axis=0)
-    return coords[np.lexsort((coords[:, 0], coords[:, 1], coords[:, 2]))]
-
-
 # Three supervoxels: two in different chunks making up one "neuron", and a
 # third sharing a chunk with the first so masking has something to exclude.
 SV_A = supervoxel((0, 0, 0), 11)
@@ -92,6 +98,11 @@ REGIONS = {
     SV_B: (slice(70, 75), slice(5, 7), slice(2, 3)),
     SV_OTHER: (slice(30, 35), slice(5, 8), slice(2, 4)),
 }
+
+# Which supervoxels each root owns, for the reverse (bounded) lookup the box
+# endpoint uses. 999 and 888 are the same roots the manifest tests use, so the
+# two paths describe the same neurons.
+ROOT_SUPERVOXELS = {999: [SV_A, SV_B], 888: [SV_A, SV_OTHER]}
 
 
 class FakeGraph:
@@ -122,6 +133,20 @@ class FakeGraph:
 
     def get_leaves(self, root_id, bbox, mip, stop_layer=None):
         self.leaf_calls.append((int(root_id), stop_layer))
+        if int(root_id) in ROOT_SUPERVOXELS and stop_layer is None and bbox is not None:
+            # The reverse lookup: only the supervoxels whose voxels actually
+            # fall inside the box. This is the behaviour the box endpoint leans
+            # on, so the stand-in has to model it rather than return everything.
+            lo = np.asarray(bbox.minpt, dtype=np.int64)
+            hi = np.asarray(bbox.maxpt, dtype=np.int64)
+            inside = []
+            for sv in ROOT_SUPERVOXELS[int(root_id)]:
+                region = REGIONS[sv]
+                starts = np.array([s.start for s in region])
+                stops = np.array([s.stop for s in region])
+                if np.all(stops > lo) and np.all(starts < hi):
+                    inside.append(sv)
+            return np.array(inside, dtype=np.uint64)
         if stop_layer == 2:
             return np.array(
                 ROOT_NODES.get(int(root_id), [L2_A, L2_B]), dtype=np.uint64
@@ -176,11 +201,25 @@ def volume():
     datasource.open_n5_mip.pop(("test_segmentation", 0), None)
 
 
-def truth_for(data, labels):
+def truth_for(data, labels, window=None, down=None):
+    """The voxels these labels own, in the order the decoders emit.
+
+    ``window`` restricts to a half-open box and ``down`` floors onto a coarse
+    grid -- the box endpoint's OR-downsampling written out by hand, rather than
+    computed the way the service computes it.
+    """
     mask = np.zeros(data.shape, dtype=bool)
     for sv in labels:
         mask |= data == sv
-    return sort_zyx(np.argwhere(mask))
+    if window is not None:
+        (x0, y0, z0), (x1, y1, z1) = window
+        keep = np.zeros(data.shape, dtype=bool)
+        keep[x0:x1, y0:y1, z0:z1] = True
+        mask &= keep
+    coords = np.argwhere(mask)
+    if down is not None:
+        coords = coords // np.asarray(down)
+    return sort_rows(coords)
 
 
 def post(supervoxels, fmt=None):
@@ -189,10 +228,6 @@ def post(supervoxels, fmt=None):
         json={"supervoxels": [str(sv) for sv in supervoxels]},
         params={"fmt": fmt} if fmt else None,
     )
-
-
-def runs_from(response):
-    return np.frombuffer(response.content, dtype="<i4").reshape(-1, 4).astype(np.int64)
 
 
 # --- the core claim -------------------------------------------------------
@@ -302,6 +337,44 @@ def test_voxel_budget_is_enforced(volume, monkeypatch):
     assert "voxels" in response.json()["detail"]
 
 
+def test_an_over_budget_request_asks_the_graph_for_no_manifests(volume, monkeypatch):
+    """Refuse first, ask later.
+
+    A manifest is one HTTP GET per layer-2 node against a shared production
+    chunkedgraph, and a cold neuron has hundreds. A request that is going to be
+    rejected for being over budget must not spend them on its way to the 400 --
+    and it does not have to, since which chunk a node occupies is packed into
+    its ID rather than something the graph has to be asked for.
+    """
+    _, graph = volume
+    monkeypatch.setitem(config.DATASOURCES["test_segmentation"], "max_chunks", 1)
+    del graph.leaf_calls[:]
+
+    response = client.get(BASE + "/root/999")
+    assert response.status_code == 400
+
+    # The stop_layer=2 lookup that found the nodes is expected; one call per
+    # node afterwards is what this guards against.
+    assert graph.leaf_calls == [(999, 2)]
+
+
+def test_a_node_clipped_away_by_the_bounds_needs_no_manifest(volume):
+    """Planning from the IDs alone also spares the graph the nodes that read
+    nothing: a chunk falling outside the volume resolves to empty without ever
+    being asked what it contains."""
+    outside = label(2, (7, 7, 7), 1)
+    stats = sparsevol_live.LiveStats()
+    _, graph = volume
+    del graph.leaf_calls[:]
+
+    fragments = sparsevol_live.compute_l2_fragments(
+        "test_segmentation", 0, [outside], stats
+    )
+    assert fragments[outside].shape == (0, 4)
+    assert graph.leaf_calls == []
+    assert stats.n_chunks == 0
+
+
 def test_coordinates_are_accumulated_narrow(volume):
     """The array that scales with neuron size stays 32-bit end to end."""
     data, graph = volume
@@ -313,7 +386,7 @@ def test_coordinates_are_accumulated_narrow(volume):
 
     assert coords.dtype == COORD_DTYPE
     assert coords.dtype.itemsize == 4
-    np.testing.assert_array_equal(sort_zyx(coords), truth_for(data, [SV_A, SV_B]))
+    np.testing.assert_array_equal(sort_rows(coords), truth_for(data, [SV_A, SV_B]))
 
     # And an empty read must agree on dtype rather than falling back to int64.
     empty = sparsevol_live.read_and_mask("test_segmentation", 0, [], [SV_A], stats)
@@ -603,3 +676,508 @@ def test_warming_stops_when_the_cache_is_full(volume, monkeypatch):
         ["test_segmentation", "999", "--scale", "0", "--chunks", "1"]
     )
     assert code == 2
+
+
+# --- box lookups ----------------------------------------------------------
+#
+# A different question from the ones above: not "where is this segment?" but
+# "what is inside this box?", for several objects at once, with the answer
+# OR-downsampled and labelled.
+
+
+def box_runs(bbox, roots=None, objects=None, down=None):
+    """Call the box path directly and return its (M, 5) runs."""
+    return sparsevol_live.box_to_runs(
+        "test_segmentation", 0, bbox, roots=roots, objects=objects, down=down
+    )
+
+
+def rows_for_label(runs, label):
+    """The coarse voxels one label claims, as sorted (N, 3) coordinates."""
+    rows = decode_rle_labelled(runs)
+    return sort_rows(rows[rows[:, 3] == label][:, :3])
+
+
+def test_box_returns_each_object_separately(volume):
+    """The core claim: one read, one response, every object labelled apart."""
+    data, _ = volume
+    bbox = [[0, 0, 0], [128, 128, 64]]
+    runs, stats = box_runs(bbox, objects=[[SV_A], [SV_OTHER]])
+
+    assert runs.shape[1] == 5
+    assert stats.n_objects == 2
+    np.testing.assert_array_equal(
+        rows_for_label(runs, 1), truth_for(data, [SV_A], window=bbox)
+    )
+    np.testing.assert_array_equal(
+        rows_for_label(runs, 2), truth_for(data, [SV_OTHER], window=bbox)
+    )
+
+
+def test_labels_are_one_based_indices_into_the_request(volume):
+    """Position in the request, not the ID -- the response carries no IDs."""
+    data, _ = volume
+    runs, _ = box_runs([[0, 0, 0], [128, 128, 64]], objects=[[SV_OTHER], [SV_A]])
+    assert set(np.unique(runs[:, 4])) == {1, 2}
+    np.testing.assert_array_equal(
+        rows_for_label(runs, 1),
+        truth_for(data, [SV_OTHER], window=[[0, 0, 0], [128, 128, 64]]),
+    )
+
+
+def test_voxels_are_clipped_to_the_box(volume):
+    """SV_A spans x 10-20; a box ending at 15 must return only half of it."""
+    data, _ = volume
+    bbox = [[0, 0, 0], [15, 128, 64]]
+    runs, _ = box_runs(bbox, objects=[[SV_A]])
+
+    coords = rows_for_label(runs, 1)
+    assert coords[:, 0].max() == 14
+    np.testing.assert_array_equal(coords, truth_for(data, [SV_A], window=bbox))
+
+
+def test_or_downsampling_keeps_every_object_in_a_coarse_voxel(volume):
+    """The whole reason for OR rather than mode.
+
+    SV_A spans x 10-20 and SV_OTHER x 30-35, so the coarse voxel covering fine
+    x 16-31 holds four voxels of SV_A against two of SV_OTHER, in the same y
+    and z. SV_OTHER is the minority there; taking a majority would erase it,
+    which is exactly how a thin neurite beside a thick one disappears. OR
+    keeps both.
+    """
+    data, _ = volume
+    bbox = [[0, 0, 0], [128, 128, 64]]
+    down = [16, 1, 1]
+    runs, _ = box_runs(bbox, objects=[[SV_A], [SV_OTHER]], down=down)
+
+    for label, sv in ((1, SV_A), (2, SV_OTHER)):
+        np.testing.assert_array_equal(
+            rows_for_label(runs, label), truth_for(data, [sv], window=bbox, down=down)
+        )
+
+    # And they really do share a coarse voxel, or the test above proves nothing.
+    shared = set(map(tuple, rows_for_label(runs, 1))) & set(
+        map(tuple, rows_for_label(runs, 2))
+    )
+    assert shared
+
+
+def test_coarse_coordinates_are_absolute_not_box_relative(volume):
+    """floor(voxel / down) of the absolute voxel, so a cache survives the box.
+
+    Two boxes that both contain the object must describe it with the same
+    coordinates; if they were relative to the corner, they would not.
+    """
+    wide, _ = box_runs([[0, 0, 0], [128, 128, 64]], objects=[[SV_A]], down=[2, 2, 1])
+    narrow, _ = box_runs([[8, 4, 0], [24, 12, 8]], objects=[[SV_A]], down=[2, 2, 1])
+    np.testing.assert_array_equal(rows_for_label(wide, 1), rows_for_label(narrow, 1))
+
+
+def test_downsampled_coordinates_do_not_depend_on_block_boundaries(
+    volume, monkeypatch
+):
+    """A coarse voxel split across two read blocks is still one coarse voxel."""
+    data, _ = volume
+    bbox = [[0, 0, 0], [128, 128, 64]]
+    down = [4, 4, 1]
+    whole, _ = box_runs(bbox, objects=[[SV_A], [SV_B]], down=down)
+
+    # One block per storage chunk, so the box is read in many pieces.
+    monkeypatch.setattr(config, "SparseVolBoxBlockVoxels", 1)
+    split, _ = box_runs(bbox, objects=[[SV_A], [SV_B]], down=down)
+
+    np.testing.assert_array_equal(whole, split)
+    np.testing.assert_array_equal(
+        rows_for_label(whole, 1), truth_for(data, [SV_A], window=bbox, down=down)
+    )
+
+
+def test_the_packed_keys_arrive_in_the_order_the_encoder_expects(volume):
+    """The box path tells the encoder its input is already sorted and unique.
+
+    That holds only because the key packs (label, z, y, x) in that bit order,
+    so one np.unique over the keys leaves exactly the order the encoder would
+    have sorted into. If it ever stopped holding, the encoder would not raise
+    -- it would quietly emit more runs than necessary, each still correct --
+    so the claim is checked here rather than trusted.
+    """
+    runs, _ = box_runs(
+        [[0, 0, 0], [128, 128, 64]], objects=[[SV_A], [SV_OTHER], [SV_B]], down=[4, 2, 1]
+    )
+    rows = decode_rle_labelled(runs)
+    resorted = encode_rle_labelled(rows[:, :3], rows[:, 3])
+    np.testing.assert_array_equal(runs, resorted)
+
+
+def test_the_coarse_grid_matches_flooring_every_voxel_by_hand():
+    """The packing against its definition, over random boxes and block splits.
+
+    The service never materialises per-voxel coordinates -- it packs a label
+    and a flat coarse index into one integer and unravels them at the end -- so
+    the thing worth checking is that the round trip equals the obvious thing:
+    floor each voxel onto the coarse grid and collect the distinct (label,
+    voxel) pairs. Random block splits because the packing has to be independent
+    of where a block boundary happens to fall.
+    """
+    rng = np.random.default_rng(5)
+    for _ in range(10):
+        lo = rng.integers(0, 50, 3)
+        hi = lo + rng.integers(5, 40, 3)
+        down = rng.integers(1, 6, 3)
+        n_objects = int(rng.integers(1, 8))
+        grid = sparsevol_live.CoarseGrid.for_box(lo, hi, down, n_objects)
+
+        volume = rng.integers(0, n_objects + 1, size=tuple(hi - lo)).astype(np.uint64)
+        cuts = [
+            np.unique(np.concatenate([[0], rng.integers(1, s, 2), [s]]))
+            for s in hi - lo
+        ]
+
+        pieces = []
+        for i in range(len(cuts[0]) - 1):
+            for j in range(len(cuts[1]) - 1):
+                for k in range(len(cuts[2]) - 1):
+                    corner = np.array([cuts[0][i], cuts[1][j], cuts[2][k]])
+                    block = volume[
+                        cuts[0][i] : cuts[0][i + 1],
+                        cuts[1][j] : cuts[1][j + 1],
+                        cuts[2][k] : cuts[2][k + 1],
+                    ]
+                    pieces.append(grid.pack(block.reshape(-1), block.shape, lo + corner))
+
+        keys, _ = sparsevol_live._merge_keys(pieces)
+        coords, labels = grid.unpack(keys)
+        got = {(int(label), tuple(c)) for label, c in zip(labels, coords)}
+
+        occupied = np.argwhere(volume > 0)
+        want = {
+            (int(volume[tuple(v)]), tuple((v + lo) // down)) for v in occupied
+        }
+        assert got == want
+
+
+def test_the_labelling_fallback_agrees_with_fastremap(volume, monkeypatch):
+    """Both label a block identically, so the optional dependency is optional.
+
+    fastremap remaps a block in one hash pass; without it the fallback has to
+    sort the block to build an inverse index. Two code paths behind an import
+    is two chances to be wrong, and only one of them runs on any given machine.
+    """
+    # Real graphene supervoxel ids, not small integers. The fast path clears
+    # non-members by magnitude -- an unmapped value comes back as its own id,
+    # and a graphene label carries its layer in the top bits, so it cannot be
+    # mistaken for an object label. That invariant is the thing under test as
+    # much as the two paths agreeing, so the fixture has to honour it.
+    rng = np.random.default_rng(0)
+    pool = np.array(
+        [supervoxel((0, 0, 0), i) for i in range(1, 12)], dtype=np.uint64
+    )
+    block = rng.choice(pool, size=(8, 8, 8)).astype(np.uint64)
+    ids = np.sort(pool[:6])
+    labels = np.array([1, 2, 2, 3, 3, 3], dtype=np.uint64)
+
+    assert ids.min() > len(labels), "ids must be graphene labels, not indices"
+    assert sparsevol_live.fastremap is not None
+    fast = sparsevol_live._label_block(block.copy(), ids, labels, 3)
+
+    monkeypatch.setattr(sparsevol_live, "fastremap", None)
+    slow = sparsevol_live._label_block(block.copy(), ids, labels, 3)
+
+    np.testing.assert_array_equal(fast, slow)
+    # Both labelled something and left something out, or this proves nothing.
+    assert np.count_nonzero(fast)
+    assert np.count_nonzero(fast == 0)
+    assert set(np.unique(fast)) <= {0, 1, 2, 3}
+
+
+def test_an_object_with_nothing_in_the_box_returns_no_runs(volume):
+    """An answer, not an error: most candidates have left the box."""
+    runs, stats = box_runs([[0, 0, 0], [25, 128, 64]], objects=[[SV_A], [SV_B]])
+    assert set(np.unique(runs[:, 4])) == {1}
+    assert stats.n_objects == 2
+
+
+def test_roots_are_resolved_against_the_box(volume):
+    """The reverse lookup: one bounded get_leaves per object.
+
+    Root 999 owns SV_A and SV_B, which are far apart in x. A box around SV_A
+    only must come back with SV_A's voxels, and the graph must have been asked
+    with the box rather than with the whole volume.
+    """
+    data, graph = volume
+    del graph.leaf_calls[:]
+    bbox = [[0, 0, 0], [25, 128, 64]]
+    runs, stats = box_runs(bbox, roots=[999])
+
+    assert [root for root, _ in graph.leaf_calls] == [999]
+    assert stats.n_supervoxels == 1
+    np.testing.assert_array_equal(
+        rows_for_label(runs, 1), truth_for(data, [SV_A], window=bbox)
+    )
+
+
+def test_a_box_outside_the_volume_is_clipped_away(volume):
+    runs, stats = box_runs([[500, 500, 500], [520, 520, 520]], objects=[[SV_A]])
+    assert runs.shape == (0, 5)
+    assert stats.voxels_read == 0
+
+
+def test_only_the_blocks_covering_the_box_are_read(volume):
+    """The box bounds the read -- not the chunks the objects occupy."""
+    _, stats = box_runs([[0, 0, 0], [16, 16, 16]], objects=[[SV_A]])
+    assert stats.voxels_read < int(np.prod(SHAPE))
+
+
+@pytest.mark.parametrize(
+    "bbox, down, message",
+    [
+        # JSON carries no integer width, so a value past int64 reaches numpy as
+        # an ordinary Python int and raises OverflowError rather than ValueError.
+        ([[0, 0, 0], [10**30, 10, 10]], None, "corner"),
+        ([[0, 0, 0], [10, 10, 10]], [10**30, 1, 1], "down must be"),
+        ([[0, 0, 0], [10, 10]], None, "corner"),
+        ([[10, 0, 0], [10, 10, 10]], None, "half-open"),
+        ([[0, 0, 0], [10, 10, 10]], [0, 1, 1], "down factors"),
+        ([[0, 0, 0], [10, 10, 10]], [1, 1], "down must be"),
+        ([[0, 0, 0], [10, 10, 10]], [999, 1, 1], "down factors"),
+    ],
+)
+def test_the_request_shape_is_validated(volume, bbox, down, message):
+    with pytest.raises(HTTPException) as caught:
+        box_runs(bbox, objects=[[SV_A]], down=down)
+    assert caught.value.status_code == 400
+    assert message in caught.value.detail
+
+
+def test_exactly_one_of_roots_and_objects(volume):
+    for kwargs in ({}, {"roots": [999], "objects": [[SV_A]]}):
+        with pytest.raises(HTTPException) as caught:
+            box_runs([[0, 0, 0], [10, 10, 10]], **kwargs)
+        assert caught.value.status_code == 400
+        assert "exactly one" in caught.value.detail
+
+
+def test_a_supervoxel_claimed_by_two_objects_is_refused(volume):
+    """Under OR semantics, attributing it to the first would silently drop it."""
+    with pytest.raises(HTTPException) as caught:
+        box_runs([[0, 0, 0], [128, 128, 64]], objects=[[SV_A], [SV_A, SV_B]])
+    assert caught.value.status_code == 400
+
+
+def test_a_box_over_the_edge_is_charged_only_for_what_it_reads(volume, monkeypatch):
+    """An open end near the surface of the brain makes a box that overhangs.
+
+    The part outside the volume is never read, so charging the budget for it
+    would refuse a request that is perfectly affordable.
+    """
+    inside = int(np.prod(SHAPE))
+    monkeypatch.setattr(config, "SparseVolBoxMaxVoxels", inside)
+
+    # Twice the volume on every axis; only the eighth inside it can be read.
+    runs, _ = box_runs([[0, 0, 0], SHAPE.tolist()], objects=[[SV_A]])
+    overhanging, _ = box_runs([[0, 0, 0], (SHAPE * 2).tolist()], objects=[[SV_A]])
+    np.testing.assert_array_equal(runs, overhanging)
+
+
+def test_a_root_listed_twice_is_refused_by_name(volume):
+    """Each root is one label, so a repeat has no meaning.
+
+    It would otherwise surface as the supervoxel-collision error, which is true
+    of the leaves but tells the caller nothing it can act on.
+    """
+    with pytest.raises(HTTPException) as caught:
+        box_runs([[0, 0, 0], [128, 128, 64]], roots=[999, 999])
+    assert caught.value.status_code == 400
+    assert "more than once" in caught.value.detail
+
+
+def test_the_box_budget_is_enforced(volume, monkeypatch):
+    monkeypatch.setattr(config, "SparseVolBoxMaxVoxels", 100)
+    with pytest.raises(HTTPException) as caught:
+        box_runs([[0, 0, 0], [128, 128, 64]], objects=[[SV_A]])
+    assert caught.value.status_code == 400
+    assert "over the" in caught.value.detail
+
+
+def test_the_answer_size_is_capped_independently_of_the_box(volume, monkeypatch):
+    """The read ceiling cannot imply this one.
+
+    A sparse box and a dense box of the same size cost the same to read and
+    differ by orders of magnitude in what they return, so the pairs that
+    survive need their own limit.
+    """
+    monkeypatch.setattr(config, "SparseVolBoxMaxCoarseVoxels", 5)
+    with pytest.raises(HTTPException) as caught:
+        box_runs([[0, 0, 0], [128, 128, 64]], objects=[[SV_A]])
+    assert caught.value.status_code == 400
+    assert "coarse voxels" in caught.value.detail
+
+    # Generous enough and the same request succeeds, so the cap is what spoke.
+    monkeypatch.setattr(config, "SparseVolBoxMaxCoarseVoxels", 10**9)
+    runs, _ = box_runs([[0, 0, 0], [128, 128, 64]], objects=[[SV_A]])
+    assert len(runs)
+
+
+def test_the_object_budget_is_enforced(volume, monkeypatch):
+    monkeypatch.setattr(config, "SparseVolBoxMaxObjects", 1)
+    with pytest.raises(HTTPException) as caught:
+        box_runs([[0, 0, 0], [128, 128, 64]], objects=[[SV_A], [SV_B]])
+    assert caught.value.status_code == 400
+    assert "objects" in caught.value.detail
+
+
+def test_the_index_backend_refuses_box_queries():
+    """Honest 501 rather than a wrong answer from the wrong data structure."""
+    with pytest.raises(HTTPException) as caught:
+        sparsevol.box_to_runs("test_index", 0, [[0, 0, 0], [10, 10, 10]], roots=[1])
+    assert caught.value.status_code == 501
+
+
+# --- the box endpoint -----------------------------------------------------
+
+
+def post_box(bbox, roots=None, objects=None, down=None, fmt=None):
+    body = {"bbox": bbox}
+    if roots is not None:
+        body["roots"] = [str(root) for root in roots]
+    if objects is not None:
+        body["objects"] = [{"supervoxels": [str(sv) for sv in g]} for g in objects]
+    if down is not None:
+        body["down"] = down
+    return client.post(BASE + "/box", json=body, params={"fmt": fmt} if fmt else None)
+
+
+def test_the_box_endpoint_reaches_the_service(volume):
+    """What the route adds: the request body arrives, the runs come back.
+
+    The voxels themselves are the service's claim and are checked against dense
+    truth above; what is route-level is that `objects` and `roots` in JSON reach
+    the right arguments, and that the response describes its own width.
+    """
+    data, _ = volume
+    bbox = [[0, 0, 0], [25, 128, 64]]
+
+    by_object = post_box(bbox, objects=[[SV_A]])
+    assert by_object.status_code == 200
+    assert by_object.headers["X-Sparsevol-Columns"] == "5"
+
+    np.testing.assert_array_equal(
+        rows_for_label(runs_from(by_object), 1), truth_for(data, [SV_A], window=bbox)
+    )
+
+    # And the same answer asked for by root, which exercises the other branch
+    # of the request model. IDs cross the wire as strings, since they are uint64
+    # and a JavaScript client loses precision past 2^53.
+    assert SV_A > 2**53
+    np.testing.assert_array_equal(runs_from(post_box(bbox, roots=[999])), runs_from(by_object))
+
+
+def test_box_formats_agree(volume):
+    bbox = [[0, 0, 0], [128, 128, 64]]
+    runs = runs_from(post_box(bbox, objects=[[SV_A], [SV_B]]))
+
+    as_json = post_box(bbox, objects=[[SV_A], [SV_B]], fmt="json").json()
+    np.testing.assert_array_equal(np.array(as_json["runs"]), runs)
+
+    as_npy = np.load(io.BytesIO(post_box(bbox, objects=[[SV_A], [SV_B]], fmt="npy").content))
+    np.testing.assert_array_equal(as_npy, runs)
+
+    # coords spells out one row per (label, voxel) pair: x, y, z, label. The
+    # header describes the body, so it says 4 here where 'rle' said 5.
+    coords_response = post_box(bbox, objects=[[SV_A], [SV_B]], fmt="coords")
+    assert coords_response.headers["X-Sparsevol-Columns"] == "4"
+    np.testing.assert_array_equal(runs_from(coords_response), decode_rle_labelled(runs))
+
+
+def test_every_sparsevol_answer_may_be_cached_forever(volume):
+    """Roots, supervoxels, the box and down are all immutable.
+
+    Proofreading mints new root IDs rather than changing the voxels under an
+    existing one, so no sparsevol answer can go stale. Only `/root` is a GET,
+    where a shared cache will act on this; on the two POST endpoints it is
+    advisory, but the claim is the same one and is worth stating uniformly.
+    """
+    for response in (
+        post_box([[0, 0, 0], [128, 128, 64]], objects=[[SV_A]]),
+        post([SV_A]),
+        client.get(BASE + "/root/999"),
+    ):
+        assert response.status_code == 200
+        assert "immutable" in response.headers["Cache-Control"]
+
+
+def test_a_json_result_past_the_limit_is_refused(volume, monkeypatch):
+    """The one format that cannot be serialized concurrently.
+
+    orjson holds the GIL for its whole run, so a huge JSON response blocks
+    every other client this worker is serving -- which is why it is refused
+    rather than served slowly. The binary formats have no such limit.
+    """
+    monkeypatch.setattr(config, "SparseVolMaxJsonRuns", 1)
+
+    refused = post_box([[0, 0, 0], [128, 128, 64]], objects=[[SV_A]], fmt="json")
+    assert refused.status_code == 400
+    assert "fmt=json" in refused.json()["detail"]
+
+    # The binary formats answer the same request unaffected.
+    for fmt in (None, "npy", "coords"):
+        assert post_box(
+            [[0, 0, 0], [128, 128, 64]], objects=[[SV_A]], fmt=fmt
+        ).status_code == 200
+
+    # And it applies to the segment endpoints too, not just the box.
+    assert post([SV_A], fmt="json").status_code == 400
+
+
+def test_the_segment_endpoints_still_report_four_columns(volume):
+    """The labelled layout must not leak into the endpoints that predate it."""
+    response = post([SV_A])
+    assert response.headers["X-Sparsevol-Columns"] == "4"
+    assert runs_from(response).shape[1] == 4
+
+    # And their coords form is still three columns, with no label.
+    coords = post([SV_A], fmt="coords")
+    assert coords.headers["X-Sparsevol-Columns"] == "3"
+    np.testing.assert_array_equal(
+        runs_from(coords), decode_rle(runs_from(response))
+    )
+
+
+def test_the_box_endpoint_validates_its_request(volume):
+    # Shape errors are the request model's to catch, and come back as 422.
+    assert client.post(BASE + "/box", json={"bbox": [[0, 0], [1, 1]]}).status_code == 422
+    assert (
+        client.post(
+            BASE + "/box", json={"bbox": [[0, 0, 0], [8, 8, 8]], "down": [1, 1]}
+        ).status_code
+        == 422
+    )
+
+    # The service's own checks are tested directly above; what matters here is
+    # that its HTTPException reaches the client as a 400 rather than a 500.
+    assert post_box([[8, 0, 0], [8, 8, 8]], objects=[[SV_A]]).status_code == 400
+
+    bad = client.post(
+        BASE + "/box", json={"bbox": [[0, 0, 0], [8, 8, 8]], "roots": ["-1"]}
+    )
+    assert bad.status_code == 400
+    assert "unsigned 64-bit" in bad.json()["detail"]
+
+
+def test_stats_headers_cover_the_box_accounting(volume):
+    """BoxStats counters reach the client without main.py naming any of them."""
+    response = post_box([[0, 0, 0], [128, 128, 64]], objects=[[SV_A], [SV_B]])
+    assert response.headers["X-Sparsevol-Objects"] == "2"
+    assert len(runs_from(response))
+    for name in ("Blocks", "Supervoxels", "Lookup-Seconds", "Voxels-Read", "Runs"):
+        assert "X-Sparsevol-" + name in response.headers
+
+
+def test_the_index_backend_refuses_the_box_route():
+    """Dispatch reaches the stub, so the refusal is an HTTP answer not a 500."""
+    response = client.post(
+        "transform-service/sparsevol/dataset/test_index/s/0/box",
+        json={"bbox": [[0, 0, 0], [8, 8, 8]], "roots": ["1"]},
+    )
+    assert response.status_code == 501
+    assert "precomputed index" in response.json()["detail"]

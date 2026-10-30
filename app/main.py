@@ -20,7 +20,7 @@ from . import config
 from . import l2cache
 from . import sparsevol
 from . import sparsevol_live
-from .rle import decode_rle
+from .rle import COORD_DTYPE, decode_rle, decode_rle_labelled, is_labelled
 from .query import map_points, query_points
 from .annotations import (
     get_flywire_segmentation_properties,
@@ -101,6 +101,10 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Without this, cross-origin JS can read the body but not one X-Sparsevol-*
+    # header of it. Note "*" is taken literally for a *credentialed* request, so
+    # a caller sending credentials would have to be given an explicit list.
+    expose_headers=["*"],
 )
 
 
@@ -464,10 +468,10 @@ def sparsevol_backend(dataset):
 
 
 class SparseVolFormat(str, Enum):
-    rle = "rle"  # binary (M, 4) int32: x, y, z, length
+    rle = "rle"  # binary int32 runs: x, y, z, length[, label]
     npy = "npy"  # the same array as a .npy file
-    json = "json"  # runs plus stats as JSON
-    coords = "coords"  # binary (N, 3) int32, one row per voxel
+    json = "json"  # runs plus stats as JSON; size-limited, see the 200 response
+    coords = "coords"  # binary int32, one row per voxel: x, y, z[, label]
 
 
 class SuperVoxelList(BaseModel):
@@ -476,16 +480,57 @@ class SuperVoxelList(BaseModel):
     supervoxels: List[int | str]
 
 
+class BoxRequest(BaseModel):
+    # Fixed-length tuples, so a malformed shape is refused here with the field
+    # named. Everything else is checked by the service, which has to hold for
+    # callers that never come through this model.
+    bbox: Tuple[Tuple[int, int, int], Tuple[int, int, int]]
+    roots: List[int | str] | None = None
+    objects: List[SuperVoxelList] | None = None
+    down: Tuple[int, int, int] | None = None
+
+
 SPARSEVOL_RESPONSES = {
     200: {
         "content": {"application/octet-stream": {}},
         "description": (
-            "Run-length encoded voxels. Response headers carry what the "
-            "request cost: X-Sparsevol-Runs, -Voxels, -Supervoxels, "
-            "-Fragments, -Missing, -Chunks, -Reads, -Bytes, -Seconds."
+            "Run-length encoded voxels.\n\n"
+            "**Layout, always present:** `X-Sparsevol-Columns` is the row "
+            "width of the body. Reshape by it rather than by which endpoint "
+            "and format you asked for -- the box endpoint carries a label "
+            "column, and `fmt=coords` changes the width again.\n\n"
+            "**Cost, backend-dependent:** the other `X-Sparsevol-*` headers "
+            "are derived from whatever the backend accounted for, so they "
+            "differ between the index, live and box paths. Read the ones you "
+            "find rather than expecting a fixed set.\n\n"
+            "**`fmt=json` is size-limited.** It is the one format that cannot "
+            "be serialized concurrently, so a result past "
+            "`SparseVolMaxJsonRuns` is refused with a 400 rather than served "
+            "at every other client's expense. The binary formats have no such "
+            "limit."
         ),
     }
 }
+
+
+def parse_ids(values, what):
+    """Coerce IDs to ints, refusing anything that is not a uint64.
+
+    Caught here because numpy would otherwise either raise deep inside the
+    request or wrap a negative ID round to a plausible-looking one and report
+    it as merely missing.
+    """
+    try:
+        ids = [int(value) for value in values]
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="{} must be integers".format(what))
+
+    if any(value < 0 or value >= 2**64 for value in ids):
+        raise HTTPException(
+            status_code=400,
+            detail="{} must fit in an unsigned 64-bit int".format(what),
+        )
+    return ids
 
 
 def stats_headers(stats):
@@ -505,39 +550,108 @@ def stats_headers(stats):
     return headers
 
 
-def sparsevol_response(runs, stats, fmt, request):
-    """Serialize runs, preferring formats that keep the response small."""
+def serialize_runs(runs, stats, fmt, request):
+    """Serialize runs, preferring formats that keep the response small.
+
+    Handles both run layouts. Which one it was given is read off the array
+    rather than passed in, because the array is the thing that knows -- see
+    :func:`app.rle.is_labelled`.
+
+    Blocking: gzipping a large box response is seconds of CPU, which is why
+    :func:`send_runs` rather than a route calls this.
+    """
     headers = stats_headers(stats)
 
     if fmt == SparseVolFormat.json:
+        limit = config.SparseVolMaxJsonRuns
+        if limit and len(runs) > limit:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Result holds {:,} runs, over the {:,} limit for fmt=json. "
+                    "This format blocks the worker for every other client while "
+                    "it serializes, so a result this large is refused rather "
+                    "than served slowly -- use fmt=rle or fmt=npy, which carry "
+                    "the same numbers and are streamed as binary.".format(
+                        len(runs), limit
+                    )
+                ),
+            )
+
+        headers["X-Sparsevol-Columns"] = str(runs.shape[1])
+        # ORJSONResponse already serializes numpy arrays, so the array goes in
+        # as it is; going via tolist() first measured ~6x slower, and several
+        # hundred MB heavier, for identical bytes. It has no fallback for an
+        # array it cannot read directly, though, so a non-contiguous one would
+        # be a 500 -- free to rule out, since this returns the same object when
+        # the array is already contiguous, which every producer's is.
         return ORJSONResponse(
-            {"runs": runs.tolist(), "stats": stats.as_dict()}, headers=headers
+            {"runs": np.ascontiguousarray(runs), "stats": stats.as_dict()},
+            headers=headers,
         )
 
     if fmt == SparseVolFormat.coords:
         # Every voxel spelled out. Offered because some clients want it, but it
-        # is the largest thing this service can return -- prefer 'rle'.
-        array = decode_rle(runs).astype("<i4")
+        # is the largest thing this service can return -- prefer 'rle'. Decoded
+        # straight to the width it goes out at, which halves the peak.
+        expand = decode_rle_labelled if is_labelled(runs) else decode_rle
+        array = expand(runs, dtype=COORD_DTYPE)
     else:
-        array = runs.astype("<i4")
+        array = runs
+
+    array = np.ascontiguousarray(array, dtype="<i4")
+
+    # Describes the body, so it differs between 'rle' and 'coords' on the same
+    # result.
+    headers["X-Sparsevol-Columns"] = str(array.shape[1])
 
     if fmt == SparseVolFormat.npy:
         buffer = io.BytesIO()
         np.save(buffer, array, allow_pickle=False)
-        content = buffer.getvalue()
+        content = buffer.getbuffer()
     else:
-        content = np.ascontiguousarray(array).tobytes()
+        # A view, not tobytes(): on a large response that copy is the whole
+        # array a second time.
+        content = array.reshape(-1).view(np.uint8)
 
-    # Runs are sorted by (z, y, x), so three of the four columns barely change
-    # down the array and gzip does well on them. Worth the CPU on a response
-    # that can run to megabytes.
+    # Runs are sorted by (z, y, x), so most columns barely change down the
+    # array and gzip does well on them. Level 5 rather than the default 6:
+    # measured ~2.4x faster for ~6% more bytes on this data.
     if "gzip" in request.headers.get("accept-encoding", ""):
-        content = gzip.compress(content, compresslevel=6)
+        content = gzip.compress(content, compresslevel=5)
         headers["Content-Encoding"] = "gzip"
+    else:
+        # Starlette returns a memoryview body as it is, so the uncompressed
+        # path never materialises a second copy -- which on fmt=coords is
+        # hundreds of megabytes at the moment the body is largest. It will not
+        # take a bare ndarray, hence the wrap.
+        content = memoryview(content)
 
     return Response(
         content=content, media_type="application/octet-stream", headers=headers
     )
+
+
+async def send_runs(runs, stats, fmt, request, cache=False):
+    """Serialize a result and return it, off the event loop.
+
+    The hop lives here rather than at each route so a new endpoint cannot
+    forget it: serializing a large response is seconds of CPU, and zlib
+    releases the GIL, so running it in a thread keeps the worker answering
+    everything else. orjson does not release the GIL, so `fmt=json` blocks for
+    its duration either way -- a reason to keep JSON responses small rather
+    than to thread harder.
+    """
+    response = await run_in_threadpool(serialize_runs, runs, stats, fmt, request)
+    if cache:
+        # Everything a sparsevol answer is computed from is immutable -- root
+        # and supervoxel IDs, a box, a downsampling factor -- so it cannot go
+        # stale; proofreading mints new IDs rather than changing these. On the
+        # GET that is a real cache hit; on the POST endpoints it is advisory,
+        # since shared caches will not store a POST on freshness alone, but it
+        # still states the contract for a client keying its own cache.
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return response
 
 
 @app.get("/sparsevol/datasets", tags=["sparsevol"], response_model=Dict)
@@ -614,7 +728,7 @@ async def sparsevol_root(
     runs, stats = await run_in_threadpool(
         sparsevol_backend(dataset.value).root_to_runs, dataset.value, scale, root_id
     )
-    return sparsevol_response(runs, stats, fmt, request)
+    return await send_runs(runs, stats, fmt, request, cache=True)
 
 
 @app.post(
@@ -640,23 +754,62 @@ async def sparsevol_supervoxels(
     Supervoxel IDs that resolve to nothing are skipped and counted rather than
     failing the request.
     """
-    try:
-        sv_ids = [int(sv) for sv in data.supervoxels]
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="Supervoxel IDs must be integers")
-
-    # Anything outside uint64 is not a label. Caught here because numpy would
-    # otherwise either raise deep in the request or wrap a negative ID round to
-    # a plausible-looking one and report it as merely missing.
-    if any(sv < 0 or sv >= 2**64 for sv in sv_ids):
-        raise HTTPException(
-            status_code=400, detail="Supervoxel IDs must fit in an unsigned 64-bit int"
-        )
+    sv_ids = parse_ids(data.supervoxels, "Supervoxel IDs")
 
     runs, stats = await run_in_threadpool(
         sparsevol_backend(dataset.value).supervoxels_to_runs, dataset.value, scale, sv_ids
     )
-    return sparsevol_response(runs, stats, fmt, request)
+    return await send_runs(runs, stats, fmt, request, cache=True)
+
+
+@app.post(
+    "/sparsevol/dataset/{dataset}/s/{scale}/box",
+    response_model=None,
+    responses=SPARSEVOL_RESPONSES,
+    tags=["sparsevol"],
+)
+async def sparsevol_box(
+    dataset: SparseVolDataSet,
+    scale: int,
+    data: BoxRequest,
+    request: Request,
+    fmt: SparseVolFormat = SparseVolFormat.rle,
+):
+    """Sparse voxels for several objects inside one box, labelled.
+
+    Where the endpoints above ask what a segment occupies, this asks what is
+    inside a box -- for up to a few hundred objects at once, at the cost of
+    reading the box once.
+
+    `bbox` is `[[x0, y0, z0], [x1, y1, z1]]` in voxels at the requested scale,
+    half-open. Give either `roots`, resolved against the box here, or
+    `objects` as a list of supervoxel lists if you already hold them.
+
+    `down` is an optional per-axis OR-downsampling factor, default `[1, 1, 1]`:
+    a coarse voxel belongs to *every* object with a fine voxel in it, so runs
+    of different labels may overlap. Runs come back as `x, y, z, length,
+    label`, with `label` the 1-based index into the objects as you gave them,
+    and coordinates absolute in the downsampled grid rather than relative to
+    the box. An object with no voxels in the box contributes no runs, which is
+    an answer rather than an error.
+    """
+    roots = objects = None
+    if data.roots is not None:
+        roots = parse_ids(data.roots, "Root IDs")
+    if data.objects is not None:
+        objects = [parse_ids(g.supervoxels, "Supervoxel IDs") for g in data.objects]
+
+    runs, stats = await run_in_threadpool(
+        sparsevol_backend(dataset.value).box_to_runs,
+        dataset.value,
+        scale,
+        data.bbox,
+        roots,
+        objects,
+        data.down,
+    )
+
+    return await send_runs(runs, stats, fmt, request, cache=True)
 
 
 # Catch all for all other paths for debugging

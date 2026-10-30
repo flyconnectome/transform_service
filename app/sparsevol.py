@@ -550,3 +550,24 @@ def root_to_runs(dataset, mip, root_id):
         )
 
     return supervoxels_to_runs(dataset, mip, sv_ids)
+
+
+def box_to_runs(dataset, mip, bbox, roots=None, objects=None, down=None):
+    """Not available from a precomputed index.
+
+    The index is keyed on supervoxel and stores whole fragments, so a box query
+    would have to read every fragment of every object and then throw away the
+    part outside the box -- which is the opposite of what the index is for. The
+    live backend reads the box itself and is the right home for this.
+
+    Implementable here if a dataset ever needs it (fetch the fragments for the
+    leaves in the box, clip, then OR-downsample on runs), but nothing does
+    today, and a wrong answer would be worse than an honest refusal.
+    """
+    raise HTTPException(
+        status_code=501,
+        detail=(
+            "Dataset {} is served from a precomputed index, which does not "
+            "support box queries.".format(dataset)
+        ),
+    )

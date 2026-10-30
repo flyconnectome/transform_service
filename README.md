@@ -57,6 +57,22 @@ each `x, y, z, length`, meaning `length` voxels from `(x, y, z)` along +X.
 Coordinates are voxels at the requested scale. Add `?fmt=` for `npy`, `json`,
 or `coords` (an `(N, 3)` array with every voxel spelled out — far larger, so
 prefer the default). Responses are gzipped when the client accepts it.
+`X-Sparsevol-Columns` gives the row width of whatever came back, so a client
+reshapes by that rather than by which endpoint and format it asked for.
+
+`fmt=json` is size-limited (`SparseVolMaxJsonRuns`). It is the one format that
+cannot be serialized concurrently — the JSON encoder holds Python's global
+lock for its whole run, so a large JSON response stalls every other client the
+worker is serving. Past the limit the request is refused with a 400 rather
+than served at everyone else's expense; `rle` and `npy` carry the same numbers
+in a fraction of the bytes and have no such limit.
+
+Every sparsevol answer is served with a long `Cache-Control: immutable`. Root
+and supervoxel IDs are immutable — proofreading mints new ones rather than
+changing the voxels under an existing ID — so an answer is valid forever
+against the request that produced it. Only `/root` is a GET, where a shared
+cache will act on it; on the POST endpoints the header is advisory, but the
+claim holds and is worth keying your own cache on.
 
 ```python
 import numpy as np, requests
@@ -70,6 +86,44 @@ print("read", r.headers["X-Sparsevol-Voxels-Read"], "voxels to get there")
 Every response carries `X-Sparsevol-*` headers accounting for what the request
 actually did — voxels returned, runs, chunks read, and how many dense voxels
 were read and discarded to produce them.
+
+### Many objects in one box
+
+The endpoints above ask where a segment is, and the answer is bounded by what
+that segment occupies. `/box` asks the opposite question — what is inside this
+box — for up to a few hundred objects at once, which is what you want when
+scoring every candidate around a point rather than fetching one neuron.
+Reading the box once costs the same whether you ask about one object or a
+hundred, so the per-object cost collapses.
+
+```bash
+curl -X POST .../sparsevol/dataset/wclee_aedes_brain/s/1/box \
+     -H 'Content-type: application/json' \
+     -d '{"bbox": [[12000, 8000, 3000], [12512, 8512, 3256]],
+          "roots": ["720575940626838909", "720575940637352552"],
+          "down": [2, 2, 1]}'
+```
+
+Runs come back as `x, y, z, length, label`, where `label` is the 1-based index
+into the objects as you gave them. Pass `objects` instead of `roots` — a list
+of `{"supervoxels": [...]}` — if you already hold the leaves.
+
+`down` is an optional per-axis **OR**-downsampling factor: a coarse voxel
+belongs to *every* object with at least one fine voxel in it, so runs of
+different labels may overlap. That is deliberate. Taking a majority instead
+would erase a thin neurite running beside a thick one, which is usually the
+thing you are looking for.
+
+Coordinates are absolute — `floor(voxel / down)` of the real voxel, not an
+offset into the box — so the same object described from two different boxes
+comes back with the same coordinates, and an answer is valid forever against
+`(objects, scale, box, down)`.
+
+An object with no voxels in the box simply contributes no runs; that is an
+answer, not an error. Boxes are bounded by `SparseVolBoxMaxVoxels` (how much
+gets read) and `SparseVolBoxMaxCoarseVoxels` (how much comes back) — a sparse
+and a dense box of the same size cost the same to read and differ by orders of
+magnitude in what they return, so the two limits are separate.
 
 ### How it knows which chunks to read
 

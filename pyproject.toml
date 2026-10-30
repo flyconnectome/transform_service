@@ -9,6 +9,10 @@ dependencies = [
     # Used by the sparsevol service: CloudFiles for ranged reads against the
     # fragment store, and the graphene frontend to resolve root IDs.
     "cloud-volume>=12.3.1",
+    # Arrives with cloud-volume, but sparsevol_live imports it directly to mask
+    # and relabel whole blocks in one pass, so it is declared rather than relied
+    # on as a transitive.
+    "fastremap>=1.14.0",
     "fastapi>=0.115.8",
     "gunicorn>=23.0.0",
     "httpx>=0.28.1",

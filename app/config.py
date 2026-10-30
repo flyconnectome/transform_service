@@ -25,7 +25,7 @@ MaxSupervoxels = 500_000
 # Sizing these needs the graph chunk size, which is large: aedes is 512x512x128
 # at mip 0, so one chunk is 33.5M voxels and 268 MB once decompressed to uint64
 # (CA3 at mip 1 is about half that). The voxel ceiling below is therefore worth
-# ~16 GB of reads, or roughly 60 aedes chunks. Raise it per dataset if real
+# ~32 GB of reads, or roughly 120 aedes chunks. Raise it per dataset if real
 # neurons turn out to span more, but raise it knowing what it costs.
 SparseVolMaxChunks = 256
 SparseVolMaxVoxels = 4_000_000_000
@@ -50,10 +50,91 @@ SparseVolMaxWorkers = 4
 # machine's memory and the number of workers you run, not this number alone.
 SparseVolMaxConcurrent = 2
 
+# NOTE (open): this bounds the *read*, not the response. The slot is released
+# when a backend returns its runs, so serializing them -- decoding coords,
+# gzipping -- happens outside it, limited only by anyio's default thread pool
+# (40). For fmt=coords on a large box that is several hundred megabytes per
+# response, so the per-worker ceiling above is optimistic for that path.
+# Fixing it means either holding the slot across serialization or giving the
+# response path its own, smaller, limit.
+
 # How long a request waits for a slot before giving up. Long enough to ride out
 # a burst, short enough that a queue cannot outlive the client or the proxy's
 # read timeout.
 SparseVolQueueSeconds = 20
+
+# Largest result that `fmt=json` will serialize. Unlike the binary formats this
+# one cannot be made concurrent: orjson holds the GIL for the whole of its run,
+# so the work blocks every other request this worker is serving whether or not
+# it is handed to a thread. Measured at ~0.067 us per run, so the ceiling below
+# is a ~0.3 s stall -- and a result that large is ~115 MB of JSON text, which
+# no caller actually wants when `rle` carries the same numbers in a few MB.
+#
+# Over the limit the request is refused rather than served slowly, because the
+# cost of serving it falls on every other client, not just the one who asked.
+SparseVolMaxJsonRuns = 5_000_000
+
+# --- box lookups -----------------------------------------------------------
+#
+# The box endpoint answers about many objects at once inside one bounding box,
+# which is a different shape of request from a whole neuron: the read is bounded
+# by the box rather than by what the segments occupy, and reading it once costs
+# the same whether one object is asked about or a hundred. So it gets its own
+# ceilings rather than borrowing the per-segment ones above, which are stated in
+# graph chunks and would reject a box that is perfectly affordable.
+#
+# Sized for SEAM's largest fixture: a 36 um box (half-width 18 um) at scale 1 is
+# ~2.4e9 voxels. That is ~19 GB of uint64 read block by block, so this ceiling is
+# mostly a *time* limit: the read itself is bounded by the block size and the
+# worker count below, not by how big the box is.
+#
+# What the box size does not bound is the answer -- see
+# SparseVolBoxMaxCoarseVoxels.
+SparseVolBoxMaxVoxels = 3_000_000_000
+
+# How many (object, coarse voxel) pairs a single box may return. This is the
+# one the read ceiling above does not imply: a box that is mostly empty costs
+# almost nothing to answer, while a dense one at down = [1, 1, 1] keeps a pair
+# per voxel read. The pairs are held as one int64 each and then unpacked into
+# coordinates, so this is roughly 0.8 GB of keys plus 1.2 GB of coordinates at
+# the value below -- against ~3e7 pairs for a real SEAM box, so it is a guard
+# against the pathological case rather than a limit anyone should meet.
+#
+# Enforced while the blocks are read, so an over-large box is refused partway
+# through rather than after everything is in memory.
+SparseVolBoxMaxCoarseVoxels = 100_000_000
+
+# One label per object, held in the runs' int64 label column and in the high
+# bits of the packed sort key, so this bounds both. SEAM scores ~100 candidates
+# per open end; the headroom is for a caller that pools more.
+SparseVolBoxMaxObjects = 256
+
+# OR-downsampling factor per axis. A coarse voxel belongs to every object with
+# at least one fine voxel in it, so this shrinks the answer without erasing the
+# thin neurites that mode-downsampling would lose.
+SparseVolBoxMaxDown = 16
+
+# Voxels per read block, rounded up to whole storage chunks. ~32M voxels is
+# ~256 MB as uint64.
+#
+# A block costs more than itself while it is being reduced. It is labelled in
+# place -- fastremap remaps it against the lookup without copying it -- but
+# packing the survivors into coarse keys allocates a few arrays sized by how
+# many of them there are, so budget roughly 2.5x the block per worker at high
+# occupancy, i.e. ~2.5 GB for SparseVolMaxWorkers blocks in flight rather than
+# the ~1 GB the chunk reads above are sized against. Lower this number if that
+# is too much for the machine.
+#
+# On top of a slot: the coarse keys accumulated across blocks, and the
+# coordinates unpacked from them before encoding. Roughly 1 GB for a 3e7-voxel
+# answer, which is why the box path holds its slot through the assembly rather
+# than releasing it when the last block lands.
+SparseVolBoxBlockVoxels = 32_000_000
+
+# Concurrent get_leaves(root, bounds=box) lookups. One per object, against the
+# shared production CAVE server, so keep it neighbourly -- same reasoning as
+# L2CacheManifestWorkers.
+SparseVolBoxLookupWorkers = 8
 
 # --- layer-2 RLE cache -----------------------------------------------------
 #
@@ -71,6 +152,7 @@ L2CacheEnabled = True
 # One SQLite file, all datasets. Put this somewhere with room: the point of the
 # cap is to keep it bounded, not small. Set L2_CACHE_PATH in the environment on
 # a deployment where the checkout is not on the roomy disk.
+# Note to self: I set the environment variable in the gunicorn_start file
 L2_CACHE_PATH = os.environ.get(
     "L2_CACHE_PATH",
     os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "l2_cache.sqlite")),

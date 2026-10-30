@@ -19,7 +19,9 @@ from app import config, sparsevol
 from app.rle import (
     COORD_DTYPE,
     decode_rle,
+    decode_rle_labelled,
     encode_rle,
+    encode_rle_labelled,
     merge_runs,
     pack_runs,
     rle_voxel_count,
@@ -27,6 +29,7 @@ from app.rle import (
     unpack_runs,
 )
 from app.sparsevol_build import write_chunk
+from conftest import runs_from, sort_rows, voxel_block
 
 client = TestClient(app)
 
@@ -48,19 +51,6 @@ def make_sv(chunk, segid):
         | (z << SEGID_BITS)
         | segid
     )
-
-
-def voxel_block(origin, shape):
-    """Every voxel of a solid box, as (N, 3) coordinates."""
-    ranges = [np.arange(o, o + s) for o, s in zip(origin, shape)]
-    grid = np.meshgrid(*ranges, indexing="ij")
-    return np.stack([g.ravel() for g in grid], axis=-1)
-
-
-def sort_zyx(coords):
-    """Deduplicate and sort into the (z, y, x) order decode_rle emits."""
-    coords = np.unique(np.asarray(coords), axis=0)
-    return coords[np.lexsort((coords[:, 0], coords[:, 1], coords[:, 2]))]
 
 
 @pytest.fixture(scope="module")
@@ -94,10 +84,6 @@ def post(supervoxels, fmt=None, headers=None):
     )
 
 
-def runs_from(response):
-    return np.frombuffer(response.content, dtype="<i4").reshape(-1, 4).astype(np.int64)
-
-
 # --- codec ----------------------------------------------------------------
 
 
@@ -107,7 +93,7 @@ def test_rle_round_trip():
     # 3 y-positions x 2 z-positions, each a solid run of 4 along x.
     assert runs.shape == (6, 4)
     assert np.all(runs[:, 3] == 4)
-    np.testing.assert_array_equal(decode_rle(runs), sort_zyx(coords))
+    np.testing.assert_array_equal(decode_rle(runs), sort_rows(coords))
     assert rle_voxel_count(runs) == len(coords)
 
 
@@ -164,7 +150,7 @@ def test_merge_runs_never_duplicates_a_voxel(random=np.random.default_rng(0)):
         )
         merged = merge_runs(runs)
         coords = decode_rle(merged)
-        truth = sort_zyx(decode_rle(runs))
+        truth = sort_rows(decode_rle(runs))
         np.testing.assert_array_equal(coords, truth)
         assert rle_voxel_count(merged) == len(truth)
 
@@ -182,14 +168,14 @@ def test_encoding_does_not_widen_narrow_coordinates():
     narrow = encode_rle(coords)
     wide = encode_rle(coords.astype(np.int64))
     np.testing.assert_array_equal(narrow, wide)
-    np.testing.assert_array_equal(decode_rle(narrow), sort_zyx(coords))
+    np.testing.assert_array_equal(decode_rle(narrow), sort_rows(coords))
 
 
 def test_encoding_handles_negative_coordinates():
     """Signed, not unsigned: a negative voxel offset must not wrap."""
     coords = np.array([[-5, -2, -1], [-4, -2, -1], [-3, -2, -1]], dtype=COORD_DTYPE)
     np.testing.assert_array_equal(encode_rle(coords), [[-5, -2, -1, 3]])
-    np.testing.assert_array_equal(decode_rle(encode_rle(coords)), sort_zyx(coords))
+    np.testing.assert_array_equal(decode_rle(encode_rle(coords)), sort_rows(coords))
 
 
 def test_union_matches_encoding_the_whole_thing_at_once():
@@ -198,6 +184,157 @@ def test_union_matches_encoding_the_whole_thing_at_once():
     together = encode_rle(np.concatenate([left, right]))
     unioned = union_rle([encode_rle(left), encode_rle(right)])
     np.testing.assert_array_equal(unioned, together)
+
+
+# --- labelled runs --------------------------------------------------------
+#
+# What the box service returns: several objects answered in one response, and
+# -- unlike a supervoxel index -- objects that may claim the same voxel.
+
+
+def test_labelled_round_trip():
+    left = voxel_block((0, 0, 0), (4, 2, 2))
+    right = voxel_block((10, 0, 0), (3, 2, 2))
+    coords = np.concatenate([left, right])
+    labels = np.concatenate([np.full(len(left), 1), np.full(len(right), 2)])
+
+    runs = encode_rle_labelled(coords, labels)
+    assert runs.shape[1] == 5
+    assert rle_voxel_count(runs) == len(coords)
+
+    rows = np.concatenate([coords, labels[:, None]], axis=1)
+    np.testing.assert_array_equal(decode_rle_labelled(runs), sort_rows(rows))
+
+
+def test_a_run_never_spans_two_labels():
+    """Two labels meeting along X describe two runs, not one.
+
+    The unlabelled encoder would coalesce these, since the voxels are adjacent
+    on the same scanline. Here they are different objects and must stay apart.
+    """
+    coords = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]])
+    labels = np.array([1, 1, 2, 2])
+
+    runs = encode_rle_labelled(coords, labels)
+    np.testing.assert_array_equal(runs, [[0, 0, 0, 2, 1], [2, 0, 0, 2, 2]])
+
+
+def test_labels_may_overlap_the_same_voxel():
+    """OR semantics: a voxel claimed by two objects is returned under both.
+
+    This is the one place labelled runs part company with the index path, where
+    a voxel carries exactly one supervoxel and fragments are disjoint.
+    """
+    coords = np.array([[5, 1, 1], [6, 1, 1], [5, 1, 1], [6, 1, 1]])
+    labels = np.array([1, 1, 2, 2])
+
+    runs = encode_rle_labelled(coords, labels)
+    np.testing.assert_array_equal(runs, [[5, 1, 1, 2, 1], [5, 1, 1, 2, 2]])
+    assert rle_voxel_count(runs) == 4
+
+
+def test_repeats_of_one_label_are_deduplicated():
+    """A voxel repeated under the *same* label is a duplicate, and is dropped.
+
+    Blocks of a box overlap on the coarse grid, so the same (label, voxel) pair
+    arrives more than once; a repeated x would otherwise break run detection.
+    """
+    coords = np.array([[1, 1, 1], [1, 1, 1], [2, 1, 1]])
+    labels = np.array([7, 7, 7])
+    np.testing.assert_array_equal(encode_rle_labelled(coords, labels), [[1, 1, 1, 2, 7]])
+
+    assume = encode_rle_labelled(coords[1:], labels[1:], assume_unique=True)
+    np.testing.assert_array_equal(assume, [[1, 1, 1, 2, 7]])
+
+
+def test_narrow_labels_survive_the_sort():
+    """Labels are compared, not differenced, so an unsigned column cannot wrap.
+
+    Object indices arrive as a narrow unsigned type -- one entry per voxel, so
+    the width is worth keeping -- and the encoder must neither widen them nor
+    lose a label above what a signed byte would hold.
+    """
+    coords = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]])
+    labels = np.array([300, 300, 2], dtype=np.uint16)
+
+    runs = encode_rle_labelled(coords, labels)
+    np.testing.assert_array_equal(runs, [[2, 0, 0, 1, 2], [0, 0, 0, 2, 300]])
+
+
+def test_labelled_matches_encoding_each_label_separately(random=np.random.default_rng(0)):
+    """Against the obvious reference: split by label, encode each on its own.
+
+    Random input, because the interesting cases are the ones that are awkward
+    to write down -- labels interleaved along a scanline, labels sharing
+    voxels, and runs that would coalesce if the label were ignored.
+    """
+    for _ in range(20):
+        n = int(random.integers(1, 400))
+        coords = random.integers(0, 6, size=(n, 3))
+        labels = random.integers(1, 4, size=n)
+
+        runs = encode_rle_labelled(coords, labels)
+
+        expected = []
+        for label in np.unique(labels):
+            part = encode_rle(coords[labels == label])
+            expected.append(
+                np.concatenate([part, np.full((len(part), 1), label)], axis=1)
+            )
+        expected = np.concatenate(expected) if expected else np.zeros((0, 5))
+
+        np.testing.assert_array_equal(runs, expected)
+
+
+def test_labelled_handles_empty_input():
+    empty = encode_rle_labelled(np.zeros((0, 3)), np.zeros(0, dtype=np.int64))
+    assert empty.shape == (0, 5)
+    assert decode_rle_labelled(empty).shape == (0, 4)
+    assert rle_voxel_count(empty) == 0
+
+
+def test_decoders_reject_runs_that_cannot_be_expanded():
+    """A non-positive length is refused by name, before anything is allocated.
+
+    The length column decides how large the output is, so checking it after
+    allocating would surface a negative length as numpy's "negative
+    dimensions" rather than as the thing that is actually wrong.
+    """
+    for bad in ([[0, 0, 0, 0]], [[0, 0, 0, -5]], [[5, 0, 0, 3], [0, 0, 0, -2]]):
+        with pytest.raises(ValueError, match="run lengths"):
+            decode_rle(np.array(bad))
+
+    with pytest.raises(ValueError, match="run lengths"):
+        decode_rle_labelled(np.array([[0, 0, 0, -5, 1]]))
+
+
+def test_labels_that_would_not_survive_the_column_are_refused():
+    """A uint64 label past 2^63 is a caller mistake, not a value to wrap.
+
+    The label column is int64 like the rest of a run, so such a label would be
+    stored -- and sorted -- as a negative number. Graphene IDs do run that
+    high; object indices, which is what this column is for, do not.
+    """
+    coords = np.array([[0, 0, 0]])
+    with pytest.raises(ValueError, match="signed 64-bit"):
+        encode_rle_labelled(coords, np.array([2**63 + 5], dtype=np.uint64))
+
+    with pytest.raises(ValueError, match="integer type"):
+        encode_rle_labelled(coords, np.array([1.5]))
+
+    # Anything that does fit is left alone, including a negative label.
+    for labels in (np.array([2**62], dtype=np.uint64), np.array([-3])):
+        runs = encode_rle_labelled(coords, labels)
+        assert runs[0, 4] == labels[0]
+
+
+def test_labelled_codec_rejects_mismatched_input():
+    with pytest.raises(ValueError):
+        encode_rle_labelled(np.zeros((4, 3)), np.zeros(3))
+    with pytest.raises(ValueError):
+        encode_rle_labelled(np.zeros((4, 2)), np.zeros(4))
+    with pytest.raises(ValueError):
+        decode_rle_labelled(np.zeros((2, 4)))
 
 
 @pytest.mark.parametrize("compress", [True, False])
@@ -275,7 +412,7 @@ def test_supervoxel_lookup_returns_the_indexed_voxels(index):
     response = post([sv])
     assert response.status_code == 200
 
-    np.testing.assert_array_equal(decode_rle(runs_from(response)), sort_zyx(index[sv]))
+    np.testing.assert_array_equal(decode_rle(runs_from(response)), sort_rows(index[sv]))
     assert response.headers["X-Sparsevol-Missing"] == "0"
     assert response.headers["X-Sparsevol-Fragments"] == "1"
 
@@ -285,7 +422,7 @@ def test_union_spans_chunks(index):
     response = post(everything)
     assert response.status_code == 200
 
-    expected = sort_zyx(np.concatenate([index[sv] for sv in everything]))
+    expected = sort_rows(np.concatenate([index[sv] for sv in everything]))
     np.testing.assert_array_equal(decode_rle(runs_from(response)), expected)
 
     assert response.headers["X-Sparsevol-Chunks"] == "2"
@@ -559,5 +696,5 @@ def test_build_from_dense_then_serve(index):
     assert response.status_code == 200
     np.testing.assert_array_equal(
         decode_rle(runs_from(response)),
-        sort_zyx(np.argwhere((cv.volume == cv.a) | (cv.volume == cv.b))),
+        sort_rows(np.argwhere((cv.volume == cv.a) | (cv.volume == cv.b))),
     )
