@@ -332,9 +332,16 @@ DATASOURCES = {
         "width": 1,
         "tsinfo": {
             "driver": "neuroglancer_precomputed",
+            # A sharded, gzipped copy of gs://fanc-fly_segmentation/wclee_aedes_brain.
+            # `gs cp` strips the bucket's gzip on download, which tripled the
+            # size on disk (mip 1: 177 GB in the bucket, 526 GiB unpacked), and
+            # tensorstore cannot read gzipped chunk files in the unsharded
+            # layout. Repacking into gzip shards brought mip 1 to 168 GiB with
+            # identical voxels. Same chunk size (256x256x64), so nothing that
+            # reads it needs to change.
             "kvstore": {
                 "driver": "file",
-                "path": "segmentation/wclee_aedes_brain",
+                "path": "segmentation/wclee_aedes_brain_sharded",
             },
         },
     },
