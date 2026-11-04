@@ -916,6 +916,20 @@ def label_lookup(groups):
     Two parallel arrays, which is the shape both labelling paths want: a
     remap table for fastremap, or a ``searchsorted`` target for the fallback.
     Labels are 1-based, so 0 is free to mean "belongs to none of them".
+
+    **A label is a position in the request, and must never become a real ID.**
+    That is a rule about access, not about formatting. This service needs no
+    credentials of its own, but it holds credentials for the chunkedgraph, and
+    some of the datasets behind it are not open to everyone. Asking about an
+    object you already know the ID of is a far higher bar than being handed a
+    list of IDs you did not know: if a response carried real root or supervoxel
+    IDs, anyone who could reach the service could sweep boxes and read back the
+    grouping that having access to the dataset is meant to gate.
+
+    So a caller keeps its own mapping from position back to whatever it asked
+    about. :func:`app.main.serialize_runs` writes the label as int32, which
+    cannot hold a 64-bit ID, and that is a second reason rather than the
+    reason.
     """
     ids, labels = [], []
     for i, supervoxels in enumerate(groups):

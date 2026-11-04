@@ -715,6 +715,31 @@ def test_box_returns_each_object_separately(volume):
     )
 
 
+def test_labels_are_never_real_ids(volume):
+    """A label is a position in the request. This is an access rule.
+
+    The service needs no credentials of its own but holds credentials for the
+    chunkedgraph, and not every dataset behind it is open. Having to know an ID
+    before you can ask about it is the only thing standing between an open
+    endpoint and a way to read back the grouping. Handing real IDs out in a
+    response would remove it, so this test exists to make that change fail.
+    """
+    runs, _ = box_runs(
+        [[0, 0, 0], [128, 128, 64]], objects=[[SV_A], [SV_B], [SV_OTHER]]
+    )
+    labels = set(np.unique(runs[:, 4]).tolist())
+
+    # Exactly positions, and only of the objects that had voxels in the box.
+    assert labels <= {1, 2, 3}
+    assert labels.isdisjoint({SV_A, SV_B, SV_OTHER, 999, 888})
+
+    # The same holds for the roots form, where the service does know a real ID
+    # and still does not put it in the answer. (Only one root here: 999 and 888
+    # share a supervoxel in this fixture, which the service rightly refuses.)
+    by_root, _ = box_runs([[0, 0, 0], [128, 128, 64]], roots=[999])
+    assert set(np.unique(by_root[:, 4]).tolist()) == {1}
+
+
 def test_labels_are_one_based_indices_into_the_request(volume):
     """Position in the request, not the ID -- the response carries no IDs."""
     data, _ = volume

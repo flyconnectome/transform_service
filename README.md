@@ -121,7 +121,15 @@ comes back with the same coordinates, and an answer is valid forever against
 
 Asking about many objects at once is close to free: the box is read and
 labelled in one pass however many you name, so 250 objects cost about 7% more
-than one. An object with no voxels in the box simply contributes no runs; that
+than one.
+
+> **A label is a position in the request, never a real ID, and that will not
+> change.** The service needs no credentials of its own but holds credentials
+> for the chunkedgraph, and some datasets behind it are not open to everyone.
+> Today you have to know an ID before you can ask about it. If responses
+> carried real root or supervoxel IDs, anyone who could reach the service could
+> sweep boxes and read back the grouping instead — so returning them would mean
+> putting the whole service behind a login. An object with no voxels in the box simply contributes no runs; that
 is an answer, not an error. Boxes are bounded by `SparseVolBoxMaxVoxels` (how much
 gets read) and `SparseVolBoxMaxCoarseVoxels` (how much comes back) — a sparse
 and a dense box of the same size cost the same to read and differ by orders of
