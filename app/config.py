@@ -326,9 +326,12 @@ DATASOURCES = {
     "wclee_aedes_brain": {
         "description": "super voxel segmentation of the mosquito whole brain [wclee_aedes_brain]",
         "type": "neuroglancer_precomputed",
-        "scales": [
-            1
-        ],  # the dataset has mip 0 and 1 but I only downloaded mip 1 so far
+        # Both mips are local. Mip 0 was downloaded straight into gzip shards
+        # (the bucket's own gzip bytes, never unzipped): 363 GiB. A graph
+        # chunk holds 4x the voxels at mip 0 (33.5M), so SparseVolMaxVoxels
+        # stops a whole neuron at ~119 chunks there; the large neurons tried
+        # span 188-339. Mip 0 is mainly for points and boxes.
+        "scales": [0, 1],
         "voxel_size": [16, 16, 45],
         "services": ["query", "sparsevol"],
         "graphene": "graphene://https://cave.fanc-fly.com/segmentation/table/wclee_aedes_brain",
