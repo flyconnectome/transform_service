@@ -1119,6 +1119,31 @@ def test_the_supervoxel_budget_is_enforced(volume, monkeypatch):
     assert stats.voxels_read > 0
 
 
+def test_many_objects_cost_little_and_pack_correctly(volume):
+    """A thousand objects in one box, which is what a mask store sends.
+
+    The block is labelled once however many objects are asked about, so the
+    thing worth checking is not speed but that the label still fits beside the
+    voxel position in the packed key, and that the few objects with voxels in
+    the box are still found among the many without.
+    """
+    wanted = {400: SV_A, 900: SV_B}
+    objects = [[] for _ in range(1000)]
+    for position, sv in wanted.items():
+        objects[position] = [sv]
+
+    data, _ = volume
+    bbox = [[0, 0, 0], [128, 128, 64]]
+    runs, stats = box_runs(bbox, objects=objects)
+
+    assert stats.n_objects == 1000
+    assert set(np.unique(runs[:, 4])) == {p + 1 for p in wanted}
+    for position, sv in wanted.items():
+        np.testing.assert_array_equal(
+            rows_for_label(runs, position + 1), truth_for(data, [sv], window=bbox)
+        )
+
+
 def test_the_object_budget_is_enforced(volume, monkeypatch):
     monkeypatch.setattr(config, "SparseVolBoxMaxObjects", 1)
     with pytest.raises(HTTPException) as caught:

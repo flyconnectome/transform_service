@@ -104,10 +104,24 @@ SparseVolBoxMaxVoxels = 3_000_000_000
 # through rather than after everything is in memory.
 SparseVolBoxMaxCoarseVoxels = 100_000_000
 
-# One label per object, held in the runs' int64 label column and in the high
-# bits of the packed sort key, so this bounds both. SEAM scores ~100 candidates
-# per open end; the headroom is for a caller that pools more.
-SparseVolBoxMaxObjects = 256
+# How many objects one box request may ask about.
+#
+# Objects are close to free: the block is labelled in one pass whatever the
+# count, measured at the same 0.051s for 1 object and for 1196, and the only
+# work that grows with the count is building the lookup table, 5ms at 1196.
+# On the live service, going from 1 to 250 objects on a 256^3 block moved the
+# request from 0.233s to 0.250s.
+#
+# So this is a sanity limit, not the real one. The real one is the packed key:
+# every object needs a label in the high bits above the voxel position, and
+# CoarseGrid.for_box refuses the request if the two together will not fit in
+# 63 bits. A 256^3 box leaves room for about 50,000 objects; the largest box
+# this service allows still leaves room for 100,000. Raise this freely -- the
+# key check is what actually protects the answer.
+#
+# 2048 covers flyCLR's busiest block (1196 neurons wanting masks from one
+# 256^3 cube) with room to spare.
+SparseVolBoxMaxObjects = 2048
 
 # Supervoxels a box request may cover, across all of its objects. Nothing else
 # bounds this -- SparseVolBoxMaxObjects caps how many objects there are, but a

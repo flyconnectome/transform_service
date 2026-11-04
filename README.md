@@ -119,8 +119,10 @@ offset into the box — so the same object described from two different boxes
 comes back with the same coordinates, and an answer is valid forever against
 `(objects, scale, box, down)`.
 
-An object with no voxels in the box simply contributes no runs; that is an
-answer, not an error. Boxes are bounded by `SparseVolBoxMaxVoxels` (how much
+Asking about many objects at once is close to free: the box is read and
+labelled in one pass however many you name, so 250 objects cost about 7% more
+than one. An object with no voxels in the box simply contributes no runs; that
+is an answer, not an error. Boxes are bounded by `SparseVolBoxMaxVoxels` (how much
 gets read) and `SparseVolBoxMaxCoarseVoxels` (how much comes back) — a sparse
 and a dense box of the same size cost the same to read and differ by orders of
 magnitude in what they return, so the two limits are separate.
