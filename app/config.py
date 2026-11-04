@@ -313,9 +313,13 @@ DATASOURCES = {
         "width": 1,
         "tsinfo": {
             "driver": "neuroglancer_precomputed",
+            # A sharded, gzipped copy, for the same reason as aedes below: the
+            # download stripped the bucket's gzip (mip 1: 174 GiB in the bucket,
+            # 639 GiB unpacked). Repacked into gzip shards: 179 GiB, identical
+            # voxels, same 256x256x64 chunks.
             "kvstore": {
                 "driver": "file",
-                "path": "segmentation/v0.2-8nm-updown3x-m0.01-no-inverse_18-18-45_20240720175632",
+                "path": "segmentation/v0.2-8nm-updown3x-m0.01-no-inverse_18-18-45_20240720175632_sharded",
             },
         },
     },
