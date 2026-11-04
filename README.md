@@ -344,6 +344,40 @@ by the proxy with a bare 413. Apply with:
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
+### Local copies of the segmentations
+
+The segmentations the service reads live on `/fafbz` and are linked into
+`segmentation/`. They are kept as **gzip-compressed shards**, not as the
+one-file-per-chunk layout the buckets use. Downloading with `gs cp` unzips
+every chunk on the way down (the bucket stores them gzipped), which roughly
+triples the size on disk — and tensorstore cannot read gzipped chunk files in
+that layout. Shards are the one place the format allows gzip.
+
+Two tools in [`tools/`](tools/) produce them. Neither unpacks any voxels, and
+the chunk size stays the same, so nothing in the service needs to change.
+
+```bash
+# Repack a scale that is already on disk unzipped (the source is only read)
+uv run python tools/to_sharded.py SRC_DIR DST_DIR 32_32_45 --workers 8
+
+# Or fill a scale straight from the bucket, keeping its gzip bytes as they are.
+# DST_DIR/info must already list the scale -- copy the bucket's info first.
+uv run python tools/fetch_sharded.py \
+    https://storage.googleapis.com/fanc-fly_segmentation/wclee_aedes_brain \
+    /fafbz/aedes/wclee_aedes_brain_sharded 16_16_45 --processes 8 --threads 32
+```
+
+Prefer `fetch_sharded` for anything not yet downloaded: it writes only the
+compressed result, where downloading first needs the unzipped size as scratch
+space. Both can resume after an interruption and write `info` last. Run them in
+`tmux` with `nice`/`ionice`, since they share the machine with the service.
+
+| dataset | scale | on disk |
+|---|---|---|
+| `wclee_aedes_brain` | mip 0 (`16_16_45`) | 363 GiB |
+| `wclee_aedes_brain` | mip 1 (`32_32_45`) | 168 GiB (526 GiB unzipped) |
+| `zheng_ca3_v2` | mip 1 (`36_36_45`) | 179 GiB (639 GiB unzipped) |
+
 To restart the service (e.g. after changing the code), you can run:
 
 ```bash
