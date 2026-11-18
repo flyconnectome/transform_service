@@ -1,7 +1,7 @@
 """Review verdicts from Coda, kept for SEAM's calibration.
 
 Readers of Coda's Review Suggestions card judge SEAM's merge suggestions --
-accept, reject, unsure -- and, if they opt in, each verdict is posted here. SEAM
+accept, reject, ends, unsure -- and, if they opt in, each verdict is posted here. SEAM
 reads them back through the export to refit how often a suggestion at a given
 score is right. Coda's side and the decisions behind it are in Coda's
 ``docs/seam-verdict-log-plan.md``.
@@ -481,7 +481,9 @@ class Record(BaseModel):
     conf: Optional[float] = None
     shown: Optional[bool] = None
     organelle: Optional[bool] = None
-    verdict: Literal["accept", "reject", "unsure", "cleared"]
+    # `reject` is a wrong continuation, `ends` a candidate rejected because the neuron ends at
+    # this tip, `cleared` a verdict taken back.
+    verdict: Literal["accept", "reject", "ends", "unsure", "cleared"]
     at: datetime
     searched_at: Optional[datetime] = None
     coda: Optional[str] = Field(default=None, max_length=64)

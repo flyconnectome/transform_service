@@ -340,6 +340,12 @@ def test_one_bad_record_refuses_the_batch_and_says_which(change):
     assert export() == []
 
 
+def test_a_neuron_ending_here_is_a_verdict_of_its_own():
+    token = session()
+    assert post([record(verdict="ends")], token).status_code == 200
+    assert export()[0]["verdict"] == "ends"
+
+
 def test_a_cleared_verdict_is_a_record():
     token = session()
     assert post([record(verdict="cleared")], token).status_code == 200

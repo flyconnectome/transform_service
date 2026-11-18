@@ -356,8 +356,12 @@ Checking an answer is a call to the chunkedgraph under the service's own
 credentials, so each worker checks at most `VerdictChecksPerMinute` (30); past
 that, an answer gets a 429 and its challenge is not spent.
 
-Records are append-only: a changed mind is a newer record (`cleared` when a
-reader takes a verdict back). Each carries an id minted by Coda, so a retried
+A verdict is `accept`, `reject` (a wrong continuation), `ends` (rejected because
+the neuron ends at this tip) or `unsure`. Records are append-only: a changed mind
+is a newer record (`cleared` when a reader takes a verdict back). A verdict is
+about a piece for a neuron, not about one tip: the card shows it on every tip
+the piece is listed at, so the latest record for a `neuron` and `candidate`
+stands, whichever `end_uid` it was given at. Each carries an id minted by Coda, so a retried
 post is not counted twice. A batch with one bad record is refused whole, and
 the error names the record's index and field. The fields are listed on
 `Record` in `app/verdicts.py`.
