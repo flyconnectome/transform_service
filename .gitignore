@@ -6,6 +6,9 @@ sparsevol_test_volume
 l2_cache.sqlite
 l2_cache.sqlite-wal
 l2_cache.sqlite-shm
+verdicts.sqlite
+verdicts.sqlite-wal
+verdicts.sqlite-shm
 .vscode
 *.log
 .pytest*

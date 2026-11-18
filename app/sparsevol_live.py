@@ -217,7 +217,22 @@ def get_live_info(dataset):
 
 def get_graph(dataset):
     """The graphene volume: manifest and chunk geometry only, never image data."""
-    info = get_live_info(dataset)
+    get_live_info(dataset)
+    return open_graph(dataset)
+
+
+def open_graph(dataset):
+    """The graphene volume of any dataset that names one, sparsevol or not.
+
+    The verdict log asks only for roots, so it needs the chunkedgraph without
+    the sparse volume service; :func:`get_graph` is this plus that check.
+    """
+    info = datasource.get_datasource_info(dataset)
+    if not info.get("graphene"):
+        raise HTTPException(
+            status_code=400,
+            detail="Dataset {} has no graphene source configured.".format(dataset),
+        )
     with _graph_lock:
         if dataset not in _graphs:
             from cloudvolume import CloudVolume

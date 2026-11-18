@@ -231,6 +231,44 @@ SPARSEVOL_INDEX_ROOT = os.environ.get(
     "file://" + os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "sparsevol_index")),
 )
 
+# --- Review verdicts from Coda (app/verdicts.py) ---------------------------
+#
+# A dataset collects verdicts when "verdicts" is among its services. It then
+# names its CAVE "datastack" and the "verdict_scale" of its local supervoxel
+# volume that challenge supervoxels are drawn from, and it needs a "graphene"
+# source to check answers against. Offer it only where the chunkedgraph refuses
+# a root lookup without sign-in: the challenge proves the poster can read it,
+# which proves nothing where anyone can. Nothing checks this for you.
+
+# Signs challenges and sessions. Unset, the service collects nothing and says
+# so. Changing it ends every session, which only means readers answer a new
+# challenge. Note to self: set it, and the admin key, in gunicorn_start.
+VERDICT_SECRET = os.environ.get("VERDICT_SECRET")
+
+# Reading the records back (GET /verdicts/export). Unset, there is no export.
+VERDICT_ADMIN_KEY = os.environ.get("VERDICT_ADMIN_KEY")
+
+VERDICTS_DB_PATH = os.environ.get(
+    "VERDICTS_DB_PATH",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "verdicts.sqlite")),
+)
+
+# A challenge is answered within this, or asked again.
+VerdictChallengeSeconds = 300
+
+# How long a passed challenge lets a reader post for.
+VerdictSessionSeconds = 12 * 3600
+
+# Answers each worker process may check against the chunkedgraph per minute. A
+# reader answers once per session, so this only ever stops a loop: checking is
+# a call to a shared chunkedgraph under the service's own credentials.
+VerdictChecksPerMinute = 30
+
+# Records per post. A reader's queue is flushed after each click, so a batch is
+# usually one record; this bounds the one after a long time offline.
+VerdictMaxBatch = 500
+
+
 SPARSEVOL_DATASOURCES = {
     ### We are currently not planning to build an index for the FlyWire public segmentation,
     ### so this is commented out.
@@ -333,8 +371,12 @@ DATASOURCES = {
         # span 188-339. Mip 0 is mainly for points and boxes.
         "scales": [0, 1],
         "voxel_size": [16, 16, 45],
-        "services": ["query", "sparsevol"],
+        "services": ["query", "sparsevol", "verdicts"],
         "graphene": "graphene://https://cave.fanc-fly.com/segmentation/table/wclee_aedes_brain",
+        # Verdicts: an anonymous root lookup here is sent to the sign-in page
+        # (checked 2026-11-18), so the challenge means something.
+        "datastack": "wclee_aedes_brain",
+        "verdict_scale": 1,
         "dtype": "uint64",
         "width": 1,
         "tsinfo": {

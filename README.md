@@ -7,6 +7,7 @@ on `flyem.mrc-lmb.cam.ac.uk` (internally `flyem1`):
 - a supervoxel look-up service for the Aedes aegypti EM volume
 - a service for dynamically generating neuroglancer segmentation properties from tables on flytable
 - a [sparse voxel service](#sparse-voxels) returning a segment's voxels as run-length encoded runs, instead of shipping raw chunks to the client
+- a [verdict log](#review-verdicts) collecting Coda readers' verdicts on SEAM's merge suggestions, for SEAM's calibration
 
 ## Requirements
 
@@ -303,6 +304,76 @@ whose RLE codec and chunk conventions this shares.
 > a live datastack — confirm it with
 > `CAVEclient("flywire_fafb_public").info.segmentation_source()` before relying
 > on it. The aedes and CA3 sources have been verified to open and authenticate.
+
+## Review verdicts
+
+Readers of Coda's Review Suggestions card accept, reject or mark unsure SEAM's
+merge suggestions. Those who opt in have each verdict posted here, and SEAM
+reads them back to refit how often a suggestion at a given score is right. The
+plan and the decisions behind it are in Coda's `docs/seam-verdict-log-plan.md`.
+
+**Coda never sends a reader's CAVE token.** To post, a reader first answers a
+challenge: the service names a supervoxel and a moment, and the reader answers
+with that supervoxel's root at that moment, looked up through their own CAVE
+access. The service checks the answer with its own credentials. A right answer
+buys a session for that datastack (12 hours).
+
+```bash
+# Which datastacks are collected
+curl .../verdicts/datastacks
+
+# 1. A challenge: {"challenge", "supervoxel", "at", "datastack", "expires"}
+curl ".../verdicts/challenge?datastack=wclee_aedes_brain"
+
+# 2. Answer it with the supervoxel's root at "at": {"session", "expires", ...}
+curl -X POST .../verdicts/session -H 'Content-type: application/json' \
+     -d '{"challenge": "...", "root": "720575940626838909"}'
+
+# 3. Post records under the session (up to 500 a call)
+curl -X POST .../verdicts -H 'Authorization: Bearer <session>' \
+     -H 'Content-type: application/json' -d '{"records": [...]}'
+
+# Read everything back, as JSON lines (admin key)
+curl ".../verdicts/export?datastack=wclee_aedes_brain&since=2026-11-18T00:00:00Z" \
+     -H 'Authorization: Bearer <VERDICT_ADMIN_KEY>'
+```
+
+What the check proves, and what it does not: that whoever posted can look up
+that dataset's roots, or holds a recent copy of its root table (which answers
+for every supervoxel not edited since). Not who they are. Anyone with access to the
+dataset can post, and a record's `name` and `email` are what the reader typed.
+`session` keeps one reader's records together either way, and a record's
+`datastack` is its session's, never the client's to say.
+
+A dataset collects verdicts when `"verdicts"` is among its `services` in
+`DATASOURCES`; it then names its CAVE `datastack` and the `verdict_scale` its
+challenge supervoxels are drawn from (one random chunk of the local copy at a
+time), and needs a `graphene` source. Offer it only where the chunkedgraph
+refuses an anonymous root lookup: where anyone can read it, the challenge
+proves nothing. Nothing checks that for you.
+
+Checking an answer is a call to the chunkedgraph under the service's own
+credentials, so each worker checks at most `VerdictChecksPerMinute` (30); past
+that, an answer gets a 429 and its challenge is not spent.
+
+Records are append-only: a changed mind is a newer record (`cleared` when a
+reader takes a verdict back). Each carries an id minted by Coda, so a retried
+post is not counted twice. A batch with one bad record is refused whole, and
+the error names the record's index and field. The fields are listed on
+`Record` in `app/verdicts.py`.
+
+Three environment variables, set in `gunicorn_start`:
+
+- `VERDICT_SECRET` signs challenges and sessions. Unset, nothing is collected
+  and every endpoint but `/verdicts/datastacks` says so. Changing it only ends
+  current sessions.
+- `VERDICT_ADMIN_KEY` guards the export. Unset, there is no export.
+- `VERDICTS_DB_PATH` is where the SQLite file goes (default: `verdicts.sqlite`
+  beside the checkout).
+
+A record holds an email when the reader gave one, which is personal data. Remove
+a reader's records on request with `DELETE FROM verdicts WHERE email = ?` (or
+`session`).
 
 ## Run the web service locally
 ```uv run uvicorn --reload app.main:app```

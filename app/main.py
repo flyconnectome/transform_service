@@ -20,6 +20,7 @@ from . import config
 from . import l2cache
 from . import sparsevol
 from . import sparsevol_live
+from . import verdicts
 from .rle import COORD_DTYPE, decode_rle, decode_rle_labelled, is_labelled
 from .query import map_points, query_points
 from .annotations import (
@@ -75,6 +76,13 @@ TAGS_METADATA = [
             "segmentation itself never crosses the wire."
         ),
     },
+    {
+        "name": "verdicts",
+        "description": (
+            "Review verdicts on SEAM's merge suggestions, posted by readers of "
+            "Coda who opt in, kept for SEAM's calibration."
+        ),
+    },
     {"name": "other"},
     {"name": "deprecated"},
 ]
@@ -106,6 +114,8 @@ app.add_middleware(
     # a caller sending credentials would have to be given an explicit list.
     expose_headers=["*"],
 )
+
+app.include_router(verdicts.router)
 
 
 # Main page of the service
