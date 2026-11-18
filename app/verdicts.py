@@ -1,7 +1,8 @@
 """Review verdicts from Coda, kept for SEAM's calibration.
 
 Readers of Coda's Review Suggestions card judge SEAM's merge suggestions --
-accept, reject, ends, unsure -- and, if they opt in, each verdict is posted here. SEAM
+accept, reject, ends, unsure -- and, if they opt in, each verdict is posted here, with
+``auto-accepted`` for a piece Coda's Auto-extend accepted and Submit merged unjudged. SEAM
 reads them back through the export to refit how often a suggestion at a given
 score is right. Coda's side and the decisions behind it are in Coda's
 ``docs/seam-verdict-log-plan.md``.
@@ -458,7 +459,11 @@ def session(answer: Answer):
 
 
 class Record(BaseModel):
-    """One verdict on one candidate at one tip, as the reader gave it."""
+    """One record on one candidate at one tip: a reader's verdict, or ``auto-accepted``.
+
+    ``auto-accepted`` is not a reader's verdict (see ``verdict`` below): a fit that counts human
+    labels filters on the word.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -482,8 +487,10 @@ class Record(BaseModel):
     shown: Optional[bool] = None
     organelle: Optional[bool] = None
     # `reject` is a wrong continuation, `ends` a candidate rejected because the neuron ends at
-    # this tip, `cleared` a verdict taken back.
-    verdict: Literal["accept", "reject", "ends", "unsure", "cleared"]
+    # this tip, `cleared` a verdict taken back. `auto-accepted` is not a reader's verdict: Coda's
+    # Auto-extend accepted the candidate on SEAM's own cutoff, and the reader let Submit merge it
+    # without judging it. Never a human label -- a fit must not count it as one.
+    verdict: Literal["accept", "reject", "ends", "unsure", "cleared", "auto-accepted"]
     at: datetime
     searched_at: Optional[datetime] = None
     coda: Optional[str] = Field(default=None, max_length=64)

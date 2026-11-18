@@ -346,6 +346,12 @@ def test_a_neuron_ending_here_is_a_verdict_of_its_own():
     assert export()[0]["verdict"] == "ends"
 
 
+def test_a_piece_auto_extend_accepted_is_a_record_of_its_own():
+    token = session()
+    assert post([record(verdict="auto-accepted")], token).status_code == 200
+    assert export()[0]["verdict"] == "auto-accepted"
+
+
 def test_a_cleared_verdict_is_a_record():
     token = session()
     assert post([record(verdict="cleared")], token).status_code == 200
